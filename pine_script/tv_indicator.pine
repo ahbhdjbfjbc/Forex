@@ -1,0 +1,141 @@
+//@version=5
+// Forex Scanner Bridge — visual regime/strategy overlay + webhook alert emitter.
+// Mirrors the classification rules in src/scanner_1_regime.py and the entry
+// triggers in src/scanner_2_strategy.py closely enough for on-chart context;
+// the Python side remains the source of truth for actual signal generation.
+indicator("Forex Scanner Bridge", overlay = true, max_lines_count = 50, max_labels_count = 50)
+
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+grp_trend   = "Trend / EMA"
+grp_vol     = "Volatility"
+grp_regime  = "Regime Thresholds"
+grp_alert   = "Webhook Alert"
+
+emaFastLen   = input.int(20, "EMA Fast", group = grp_trend)
+emaMidLen    = input.int(50, "EMA Mid", group = grp_trend)
+emaSlowLen   = input.int(200, "EMA Slow", group = grp_trend)
+rsiLen       = input.int(14, "RSI Length", group = grp_trend)
+
+bbLen        = input.int(20, "Bollinger Length", group = grp_vol)
+bbMult       = input.float(2.0, "Bollinger StdDev", group = grp_vol)
+atrLen       = input.int(14, "ATR Length", group = grp_vol)
+donchianLen  = input.int(20, "Donchian Length", group = grp_vol)
+keltnerMult  = input.float(2.0, "Keltner ATR Multiplier", group = grp_vol)
+
+adxLen           = input.int(14, "ADX Length", group = grp_regime)
+adxThreshold     = input.float(25.0, "ADX Trend Threshold", group = grp_regime)
+atrExpansionMult = input.float(1.5, "ATR Expansion Multiplier", group = grp_regime)
+bbSqueezePct     = input.float(20.0, "BB Squeeze Percentile", group = grp_regime)
+
+webhookSecret = input.string("change-me-to-a-long-random-string", "Webhook Shared Secret", group = grp_alert)
+enableAlerts  = input.bool(true, "Enable Alert Firing", group = grp_alert)
+
+// ---------------------------------------------------------------------------
+// Core indicators
+// ---------------------------------------------------------------------------
+emaFast = ta.ema(close, emaFastLen)
+emaMid  = ta.ema(close, emaMidLen)
+emaSlow = ta.ema(close, emaSlowLen)
+rsiVal  = ta.rsi(close, rsiLen)
+atrVal  = ta.atr(atrLen)
+atrAvg  = ta.sma(atrVal, 50)
+
+[bbMid, bbUpper, bbLower] = ta.bb(close, bbLen, bbMult)
+bbBandwidth   = (bbUpper - bbLower) / bbMid
+bbBandwidthPct = ta.percentrank(bbBandwidth, 100)
+
+donchianUpper = ta.highest(high, donchianLen)
+donchianLower = ta.lowest(low, donchianLen)
+
+keltnerMid   = ta.ema(close, 20)
+keltnerUpper = keltnerMid + keltnerMult * ta.atr(10)
+keltnerLower = keltnerMid - keltnerMult * ta.atr(10)
+
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+
+// ---------------------------------------------------------------------------
+// Regime classification (visual approximation of scanner_1_regime.py)
+// ---------------------------------------------------------------------------
+adxStrong      = adxVal > adxThreshold
+emaBullAligned = emaFast > emaMid and emaMid > emaSlow
+emaBearAligned = emaFast < emaMid and emaMid < emaSlow
+atrRatio       = atrVal / atrAvg
+
+isStrongBull = adxStrong and emaBullAligned
+isStrongBear = adxStrong and emaBearAligned
+isVolExpansion = not isStrongBull and not isStrongBear and (atrRatio >= atrExpansionMult or bbBandwidthPct >= 80)
+isRanging      = not isStrongBull and not isStrongBear and not isVolExpansion and bbBandwidthPct <= bbSqueezePct and not adxStrong
+
+regimeColor = isStrongBull ? color.new(color.green, 85) :
+              isStrongBear ? color.new(color.red, 85) :
+              isVolExpansion ? color.new(color.orange, 85) :
+              isRanging ? color.new(color.blue, 90) : na
+
+bgcolor(regimeColor, title = "Regime Background")
+
+// ---------------------------------------------------------------------------
+// Plots
+// ---------------------------------------------------------------------------
+plot(emaFast, "EMA 20", color = color.yellow)
+plot(emaMid, "EMA 50", color = color.orange)
+plot(emaSlow, "EMA 200", color = color.red)
+
+p1 = plot(bbUpper, "BB Upper", color = color.new(color.gray, 40))
+p2 = plot(bbLower, "BB Lower", color = color.new(color.gray, 40))
+fill(p1, p2, color = color.new(color.gray, 90))
+
+plot(donchianUpper, "Donchian Upper", color = color.new(color.teal, 30), style = plot.style_circles)
+plot(donchianLower, "Donchian Lower", color = color.new(color.teal, 30), style = plot.style_circles)
+
+// ---------------------------------------------------------------------------
+// Entry triggers (mirrors scanner_2_strategy.py at a glance, not 1:1)
+// ---------------------------------------------------------------------------
+ema20TouchLong  = low <= emaFast and emaFast <= high
+rsiTurningUp    = rsiVal > rsiVal[1]
+rsiTurningDown  = rsiVal < rsiVal[1]
+
+pullbackLongTrigger  = isStrongBull and ema20TouchLong and rsiVal < 55 and rsiTurningUp
+pullbackShortTrigger = isStrongBear and ema20TouchLong and rsiVal > 45 and rsiTurningDown
+
+fadeShortTrigger = isRanging and close >= bbUpper and rsiVal >= 70
+fadeLongTrigger  = isRanging and close <= bbLower and rsiVal <= 30
+
+breakoutLongTrigger  = isVolExpansion and close > donchianUpper[1]
+breakoutShortTrigger = isVolExpansion and close < donchianLower[1]
+
+longSignal  = pullbackLongTrigger or fadeLongTrigger or breakoutLongTrigger
+shortSignal = pullbackShortTrigger or fadeShortTrigger or breakoutShortTrigger
+
+plotshape(longSignal, title = "Long Trigger", style = shape.triangleup, location = location.belowbar, color = color.green, size = size.tiny)
+plotshape(shortSignal, title = "Short Trigger", style = shape.triangledown, location = location.abovebar, color = color.red, size = size.tiny)
+
+// ---------------------------------------------------------------------------
+// Webhook alert payloads — match src/models.py TradingViewAlert schema
+// ---------------------------------------------------------------------------
+longMessage  = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe.period + '", "signal": "BUY", "price": ' + str.tostring(close) + ', "secret": "' + webhookSecret + '", "strategy": "pine_bridge"}'
+shortMessage = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe.period + '", "signal": "SELL", "price": ' + str.tostring(close) + ', "secret": "' + webhookSecret + '", "strategy": "pine_bridge"}'
+
+if enableAlerts and longSignal
+    alert(longMessage, alert.freq_once_per_bar_close)
+
+if enableAlerts and shortSignal
+    alert(shortMessage, alert.freq_once_per_bar_close)
+
+alertcondition(longSignal, title = "Forex Scanner Long", message = "BUY {{ticker}} {{interval}} @ {{close}}")
+alertcondition(shortSignal, title = "Forex Scanner Short", message = "SELL {{ticker}} {{interval}} @ {{close}}")
+
+// ---------------------------------------------------------------------------
+// Setup notes for TradingView:
+// 1. Add this indicator to your chart.
+// 2. Create an Alert -> Condition: "Forex Scanner Bridge" -> the long/short
+//    alertcondition, OR use "Any alert() function call" if using the
+//    alert() calls above (recommended — carries the full JSON payload).
+// 3. Public Webhook URL should be https://<your-domain>/webhook/tradingview
+//    behind an HTTPS reverse proxy; do not expose plain-HTTP Uvicorn directly.
+// 4. Set "Message" to {{strategy.order.alert_message}} when using alert(),
+//    or paste the JSON manually when using alertcondition().
+// 5. Replace `webhookSecret` input with the same value as WEBHOOK_SHARED_SECRET
+//    in your .env.
+// ---------------------------------------------------------------------------

@@ -1,0 +1,27 @@
+{
+  "trend_pullback": {
+    "rsi_length": 14,
+    "atr_length": 14,
+    "structure_lookback": 50,
+    "ema_touch_tolerance_pct": 0.0015,
+    "atr_sl_multiplier": 1.5,
+    "rsi_bullish_ceiling": 55.0,
+    "rsi_bearish_floor": 45.0
+  },
+  "mean_reversion": {
+    "bb_length": 20,
+    "rsi_length": 14,
+    "atr_length": 14,
+    "rsi_overbought": 70.0,
+    "rsi_oversold": 30.0,
+    "sl_atr_buffer": 0.5
+  },
+  "breakout": {
+    "donchian_length": 20,
+    "keltner_ema_length": 20,
+    "keltner_atr_length": 10,
+    "atr_length": 14,
+    "atr_sl_multiplier": 1.5,
+    "breakout_rvol_min": 1.2
+  }
+}
