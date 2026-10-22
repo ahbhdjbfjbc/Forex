@@ -29,10 +29,11 @@ from typing import Any
 from strategies.breakout import BreakoutParams
 from strategies.mean_reversion import MeanReversionParams
 from strategies.trend_pullback import TrendPullbackParams
+from src.storage import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PARAMS_PATH = Path(__file__).resolve().parent.parent / "data" / "strategy_params.json"
+DEFAULT_PARAMS_PATH = get_data_dir() / "strategy_params.json"
 
 PARAM_CLASSES: dict[str, type] = {
     "trend_pullback": TrendPullbackParams,

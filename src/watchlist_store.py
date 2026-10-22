@@ -21,11 +21,12 @@ import threading
 from pathlib import Path
 
 from src.symbol_resolver import sanitize_symbol
+from src.storage import get_data_dir
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_WATCHLIST = ["EURUSD", "GBPUSD", "XAUUSD", "USDJPY"]
-DEFAULT_STORE_PATH = Path(__file__).resolve().parent.parent / "data" / "watchlist.json"
+DEFAULT_STORE_PATH = get_data_dir() / "watchlist.json"
 
 
 class WatchlistStore:

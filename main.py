@@ -98,7 +98,7 @@ async def _run_webhook_and_telegram(settings: Settings) -> None:
     config = uvicorn.Config(
         webhook_app,
         host=settings.webhook_host,
-        port=settings.webhook_port,
+        port=settings.service_port,
         log_level=settings.log_level.lower(),
     )
     server = uvicorn.Server(config)
@@ -130,13 +130,16 @@ def main() -> None:
     )
 
     scheduler = build_scheduler(settings)
+    scheduler.add_job(
+        run_scan_cycle,
+        "date",
+        id="forex_initial_scan_cycle",
+        kwargs={"settings": settings},
+        max_instances=1,
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info("scheduler started: auto-scanning every %ds", settings.auto_scan_interval_seconds)
-
-    try:
-        run_scan_cycle(settings)  # fire once immediately so alerts don't wait a full interval
-    except Exception:
-        logger.exception("initial scan cycle failed; scheduler will retry on next interval")
 
     try:
         asyncio.run(_run_webhook_and_telegram(settings))

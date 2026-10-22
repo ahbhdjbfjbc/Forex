@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import math
+from pathlib import Path
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,6 +43,10 @@ class Settings(BaseSettings):
     # Webhook bridge
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 8000
+    # Railway injects PORT; local deployments continue to use WEBHOOK_PORT.
+    port: int | None = None
+    # Optional mounted directory for mutable JSON state on persistent hosts.
+    forex_data_dir: Path | None = None
     webhook_shared_secret: str = "change-me-to-a-long-random-string"
 
     # Notifications
@@ -109,6 +114,17 @@ class Settings(BaseSettings):
         if not 1 <= v <= 65535:
             raise ValueError("webhook_port must be between 1 and 65535")
         return v
+
+    @field_validator("port")
+    @classmethod
+    def _valid_platform_port(cls, v: int | None) -> int | None:
+        if v is not None and not 1 <= v <= 65535:
+            raise ValueError("PORT must be between 1 and 65535")
+        return v
+
+    @property
+    def service_port(self) -> int:
+        return self.port if self.port is not None else self.webhook_port
 
     @property
     def watchlist_symbols(self) -> list[str]:

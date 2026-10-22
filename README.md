@@ -53,6 +53,9 @@ python strategy_evolver.py --strategy trend_pullback --symbol EURUSD --timeframe
 python strategy_evolver.py --apply <proposal_id>   # only works if that proposal passed
 ```
 
+See [Railway deployment notes](RAILWAY_DEPLOYMENT_AR.md) for hosted deployment,
+environment variables, persistent storage, and health-check settings.
+
 ## What each piece does
 
 - **`src/scanner_1_regime.py`** — pulls OHLCV (via `yfinance`, resampled to

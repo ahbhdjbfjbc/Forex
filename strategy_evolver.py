@@ -35,11 +35,12 @@ from uuid import uuid4
 from config import Settings, get_settings
 from backtester import BacktestResult, run_backtest
 from src.strategy_params import DEFAULT_PARAMS_PATH, PARAM_CLASSES, get_strategy_params, save_strategy_params
+from src.storage import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-PROPOSALS_DIR = Path(__file__).resolve().parent / "data" / "strategy_proposals"
-BACKUPS_DIR = Path(__file__).resolve().parent / "data" / "strategy_params_backups"
+PROPOSALS_DIR = get_data_dir() / "strategy_proposals"
+BACKUPS_DIR = get_data_dir() / "strategy_params_backups"
 
 ACCEPTANCE_MIN_SHARPE = 1.5
 ACCEPTANCE_MIN_PROFIT_FACTOR = 1.3
