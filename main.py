@@ -1,33 +1,9 @@
-"""Orchestrator — entry point.
-
-Wires the pipeline: Scanner 1 (regime) -> Scanner 2 (strategy/signal) ->
-Notifier, run every `AUTO_SCAN_INTERVAL_SECONDS` (default 3 hours) via
-APScheduler over the dynamic watchlist (`src.watchlist_store` — seeded with
-defaults, grown by `/add` and by successful on-demand `/scan` requests),
-while also serving:
-  - the TradingView webhook bridge (FastAPI/uvicorn), for externally
-    triggered Pine Script alerts, and
-  - the on-demand Telegram bot (src/telegram_bot.py), for typing a ticker
-    and getting an immediate scan, or managing the watchlist.
-
-Both the webhook server and the Telegram bot are asyncio-based, so they run
-concurrently in a single event loop; APScheduler's BackgroundScheduler runs
-the periodic scan loop on its own thread independently of that loop.
-
-Only high-confidence, actively-triggered setups get pushed — anything with
-no active entry trigger (Scanner 2 already returns None for those) or below
-`MIN_SIGNAL_CONFIDENCE` is suppressed, so a 3-hour tick over a growing
-watchlist doesn't turn into spam. If `ENABLE_PAPER_TRADING=true`, each
-dispatched signal is also mirrored to an OANDA practice account
-(`src.paper_executor`) — opt-in, disabled by default.
-
-This module does no indicator/regime/strategy math itself — it only calls
-the public entry points each of those modules expose.
-"""
+"""Orchestrator — entry point."""
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -43,6 +19,20 @@ from src.watchlist_store import watchlist_store
 
 logger = logging.getLogger(__name__)
 
+# ذاكرة لحفظ وقت آخر توصية لكل زوج وفريم لمنع التكرار (4 ساعات = 14400 ثانية)
+_LAST_SIGNAL_SENT: dict[tuple[str, str, str], float] = {}
+SIGNAL_COOLDOWN_SECONDS = 4 * 60 * 60
+
+
+def _can_send_signal(symbol: str, timeframe: str, direction: str) -> bool:
+    key = (symbol, timeframe, direction)
+    now = time.time()
+    last_time = _LAST_SIGNAL_SENT.get(key)
+    if last_time is not None and (now - last_time) < SIGNAL_COOLDOWN_SECONDS:
+        return False
+    _LAST_SIGNAL_SENT[key] = now
+    return True
+
 
 def run_scan_cycle(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
@@ -55,6 +45,7 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
     regime_data = scan_symbols_with_data(symbols, settings)
     signals_sent = 0
     suppressed_low_confidence = 0
+    suppressed_duplicate = 0
 
     for regime_result, df in regime_data:
         signal = generate_signal(regime_result, df, settings)
@@ -68,24 +59,36 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
                 regime_result.confidence, settings.min_signal_confidence,
             )
             continue
+
+        # فحص عدم تكرار التوصية خلال نفس الشمعة
+        if not _can_send_signal(regime_result.symbol, regime_result.timeframe, signal.direction.value):
+            suppressed_duplicate += 1
+            logger.info(
+                "suppressing duplicate %s signal for %s/%s (within cooldown)",
+                signal.direction.value, regime_result.symbol, regime_result.timeframe,
+            )
+            continue
+
         send_alert(signal, settings)
         signals_sent += 1
-        execute_paper_trade(signal, settings)  # no-op unless ENABLE_PAPER_TRADING=true
+        execute_paper_trade(signal, settings)
 
     logger.info(
         "auto-scan cycle complete: %d/%d (symbol,timeframe) pairs returned data, "
-        "%d signals dispatched, %d suppressed for low confidence",
+        "%d signals dispatched, %d low confidence, %d duplicates suppressed",
         len(regime_data), len(symbols) * len(settings.timeframe_list),
-        signals_sent, suppressed_low_confidence,
+        signals_sent, suppressed_low_confidence, suppressed_duplicate,
     )
 
 
 def build_scheduler(settings: Settings) -> BackgroundScheduler:
     scheduler = BackgroundScheduler(timezone="UTC")
+    # التأكد من أن وقت الفحص لا يقل عن 15 دقيقة (900 ثانية) حتى لو تم تغييره بالخطأ في الإعدادات
+    interval = max(settings.auto_scan_interval_seconds, 900)
     scheduler.add_job(
         run_scan_cycle,
         "interval",
-        seconds=settings.auto_scan_interval_seconds,
+        seconds=interval,
         id="forex_auto_scan_cycle",
         kwargs={"settings": settings},
         max_instances=1,
@@ -139,7 +142,7 @@ def main() -> None:
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("scheduler started: auto-scanning every %ds", settings.auto_scan_interval_seconds)
+    logger.info("scheduler started: auto-scanning every %ds", max(settings.auto_scan_interval_seconds, 900))
 
     try:
         asyncio.run(_run_webhook_and_telegram(settings))
