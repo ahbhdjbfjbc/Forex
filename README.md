@@ -88,11 +88,15 @@ environment variables, persistent storage, and health-check settings.
   setup or a "DO NOT TRADE" with the reason. Every symbol you scan is
   auto-added to the 3-hour auto-scan watchlist. Also handles `/watchlist`
   (list what's being auto-scanned), `/add <symbol>`, `/remove <symbol>`.
-  Only the chat configured as `TELEGRAM_CHAT_ID` is served. Private chats
-  work without an extra user setting; if commands are used in a group, set
-  `TELEGRAM_ALLOWED_USER_ID` to the one numeric Telegram user ID allowed to
-  issue commands. A group chat alone no longer grants command access to every
-  member. `src/symbol_resolver.py` handles the free-text -> ticker mapping
+  Telegram replies and commands use `TELEGRAM_CHAT_ID`. Outbound alerts can
+  be routed independently with comma-separated `TELEGRAM_NOTIFICATION_CHAT_IDS`
+  (for example, a Telegram supergroup ID), so a private command chat can remain
+  private while signals go to a group. Add the bot to each target group and
+  allow it to send messages. If commands are used in a group, set
+  `TELEGRAM_CHAT_ID` to that group and set `TELEGRAM_ALLOWED_USER_ID` to the
+  one numeric Telegram user ID allowed to issue commands. A group chat alone
+  does not grant command access to every member. Bot responses and signal
+  reports are in Arabic. `src/symbol_resolver.py` handles the free-text -> ticker mapping
   (including proxying gold/silver through `GC=F`/`SI=F` futures, since
   Yahoo has no retail XAUUSD ticker).
 

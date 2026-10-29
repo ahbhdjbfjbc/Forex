@@ -24,19 +24,21 @@ logger = logging.getLogger(__name__)
 DIRECTION_EMOJI = {TradeDirection.BUY: "🟢", TradeDirection.SELL: "🔴"}
 
 REGIME_LABELS = {
-    MarketRegime.STRONG_TREND_BULLISH: "Strong Trend Bullish",
-    MarketRegime.STRONG_TREND_BEARISH: "Strong Trend Bearish",
-    MarketRegime.RANGING_CONSOLIDATION: "Ranging Consolidation",
-    MarketRegime.HIGH_VOLATILITY_EXPANSION: "High Volatility Expansion",
-    MarketRegime.LOW_LIQUIDITY_CHOP: "Low Liquidity Chop",
+    MarketRegime.STRONG_TREND_BULLISH: "اتجاه صاعد قوي",
+    MarketRegime.STRONG_TREND_BEARISH: "اتجاه هابط قوي",
+    MarketRegime.RANGING_CONSOLIDATION: "سوق عرضي",
+    MarketRegime.HIGH_VOLATILITY_EXPANSION: "توسع في التقلبات",
+    MarketRegime.LOW_LIQUIDITY_CHOP: "تذبذب مع سيولة منخفضة",
 }
 
 STRATEGY_LABELS = {
-    StrategyType.TREND_PULLBACK: "Trend Retracement (EMA 20 Touch)",
-    StrategyType.MEAN_REVERSION_FADE: "Mean Reversion Fade (BB + RSI)",
-    StrategyType.VOLATILITY_BREAKOUT: "Volatility Breakout (Donchian/Keltner)",
-    StrategyType.NO_TRADE: "No Trade",
+    StrategyType.TREND_PULLBACK: "ارتداد مع الاتجاه عند المتوسط المتحرك الأسي 20",
+    StrategyType.MEAN_REVERSION_FADE: "عودة إلى المتوسط وفق نطاقات بولينجر ومؤشر القوة النسبية",
+    StrategyType.VOLATILITY_BREAKOUT: "اختراق التقلبات وفق قنوات دونشيان/كيلتنر",
+    StrategyType.NO_TRADE: "لا توجد صفقة",
 }
+
+DIRECTION_LABELS = {TradeDirection.BUY: "شراء", TradeDirection.SELL: "بيع"}
 
 
 def format_pair(symbol: str) -> str:
@@ -53,60 +55,59 @@ def format_message(signal: TradeSignal) -> str:
     tf_label = signal.timeframe.upper()
 
     if instrument_type(signal.symbol) == "FX":
-        sl_text = f"Stop Loss: {signal.stop_loss_price} (-{signal.stop_loss_pips:g} pips)"
-        tp1_text = (f"Take Profit 1: {signal.take_profit_1_price} "
-                    f"(+{signal.take_profit_1_pips:g} pips, R:R 1:{signal.take_profit_1_rr:g})")
-        tp2_text = (f"Take Profit 2: {signal.take_profit_2_price} "
-                    f"(+{signal.take_profit_2_pips:g} pips, R:R 1:{signal.take_profit_2_rr:g})")
-        size_text = f"Recommended Lot: {signal.risk.lot_size:g} standard lots"
+        sl_text = f"وقف الخسارة: {signal.stop_loss_price} (-{signal.stop_loss_pips:g} نقطة)"
+        tp1_text = (f"الهدف الأول: {signal.take_profit_1_price} "
+                    f"(+{signal.take_profit_1_pips:g} نقطة، عائد/مخاطرة 1:{signal.take_profit_1_rr:g})")
+        tp2_text = (f"الهدف الثاني: {signal.take_profit_2_price} "
+                    f"(+{signal.take_profit_2_pips:g} نقطة، عائد/مخاطرة 1:{signal.take_profit_2_rr:g})")
+        size_text = f"حجم الصفقة المقترح: {signal.risk.lot_size:g} لوت قياسي"
     else:
-        unit = "BTC" if signal.symbol.upper().startswith("BTC") else "ETH" if signal.symbol.upper().startswith("ETH") else "oz" if instrument_type(signal.symbol) == "METAL" else "units"
-        sl_text = f"Stop Loss: {signal.stop_loss_price} (price distance {signal.stop_loss_pips:g})"
-        tp1_text = (f"Take Profit 1: {signal.take_profit_1_price} "
-                    f"(price distance {signal.take_profit_1_pips:g}, R:R 1:{signal.take_profit_1_rr:g})")
-        tp2_text = (f"Take Profit 2: {signal.take_profit_2_price} "
-                    f"(price distance {signal.take_profit_2_pips:g}, R:R 1:{signal.take_profit_2_rr:g})")
-        size_text = f"Indicative Size: {signal.risk.lot_size:g} {unit} (broker contract size may differ)"
+        unit = "بيتكوين" if signal.symbol.upper().startswith("BTC") else "إيثيريوم" if signal.symbol.upper().startswith("ETH") else "أونصة" if instrument_type(signal.symbol) == "METAL" else "وحدة"
+        sl_text = f"وقف الخسارة: {signal.stop_loss_price} (مسافة السعر {signal.stop_loss_pips:g})"
+        tp1_text = (f"الهدف الأول: {signal.take_profit_1_price} "
+                    f"(مسافة السعر {signal.take_profit_1_pips:g}، عائد/مخاطرة 1:{signal.take_profit_1_rr:g})")
+        tp2_text = (f"الهدف الثاني: {signal.take_profit_2_price} "
+                    f"(مسافة السعر {signal.take_profit_2_pips:g}، عائد/مخاطرة 1:{signal.take_profit_2_rr:g})")
+        size_text = f"الحجم الاسترشادي: {signal.risk.lot_size:g} {unit} (قد يختلف حسب عقد الوسيط)"
 
     lines = [
-        "🚨 TRADE SIGNAL TRIGGERED 🚨",
-        f"Pair: {format_pair(signal.symbol)}",
-        f"Direction: {signal.direction.value} {direction_emoji}",
-        f"Regime: {regime_label} ({tf_label})",
-        f"Strategy: {strategy_label}",
+        "🚨 توصية تداول جديدة 🚨",
+        f"الزوج: {format_pair(signal.symbol)}",
+        f"الاتجاه: {DIRECTION_LABELS.get(signal.direction, signal.direction.value)} {direction_emoji}",
+        f"حالة السوق: {regime_label} ({tf_label})",
+        f"الاستراتيجية: {strategy_label}",
         "------------------------------",
-        f"Entry: {signal.entry_price}",
+        f"سعر الدخول: {signal.entry_price}",
         sl_text,
         tp1_text,
         tp2_text,
-        size_text + f" (risk setting: {signal.risk.risk_percent:g}% of ${signal.risk.account_size_usd:,.0f})",
+        size_text + f" (المخاطرة {signal.risk.risk_percent:g}% من حساب ${signal.risk.account_size_usd:,.0f})",
         "------------------------------",
-        f"Time: {signal.timestamp.strftime('%Y-%m-%d %H:%M:%S')} UTC",
+        f"الوقت: {signal.timestamp.strftime('%Y-%m-%d %H:%M:%S')} بتوقيت UTC",
     ]
     return "\n".join(lines)
 
 
 def send_telegram(message: str, settings: Settings) -> bool:
-    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+    targets = settings.telegram_notification_targets
+    if not settings.telegram_bot_token or not targets:
         logger.debug("telegram not configured, skipping")
         return False
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
-    try:
-        resp = httpx.post(
-            url, json={"chat_id": settings.telegram_chat_id, "text": message}, timeout=10.0
-        )
-        if resp.status_code == 429:
-            # Do not log response bodies or request URLs; the bot token is part
-            # of Telegram's URL path and may otherwise appear in exceptions.
-            logger.warning("telegram rate-limited (HTTP %s)", resp.status_code)
-            return False
-        resp.raise_for_status()
-        return True
-    except httpx.HTTPError as exc:
-        # HTTPX exceptions can include the full request URL, which contains the
-        # Telegram bot token. Log only the exception class, never its text.
-        logger.error("telegram send failed (%s)", type(exc).__name__)
-        return False
+    delivered = 0
+    for target in targets:
+        try:
+            resp = httpx.post(url, json={"chat_id": target, "text": message}, timeout=10.0)
+            if resp.status_code == 429:
+                logger.warning("telegram rate-limited (HTTP %s)", resp.status_code)
+                continue
+            resp.raise_for_status()
+            delivered += 1
+        except httpx.HTTPError as exc:
+            logger.error("telegram send failed (%s)", type(exc).__name__)
+    if delivered != len(targets):
+        logger.warning("telegram delivery succeeded for %d of %d configured targets", delivered, len(targets))
+    return delivered > 0
 
 
 def send_discord(message: str, settings: Settings) -> bool:
@@ -137,7 +138,7 @@ def send_desktop(message: str, settings: Settings) -> bool:
         return False
     try:
         if platform.system() == "Darwin":
-            title = "Forex Signal"
+            title = "توصية فوركس"
             safe_message = _escape_applescript_string(message[:200])
             safe_title = _escape_applescript_string(title)
             script = f'display notification "{safe_message}" with title "{safe_title}"'

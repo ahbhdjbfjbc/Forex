@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # Notifications
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # Optional comma-separated outbound targets (e.g. Telegram group IDs).
+    # If empty, outbound alerts continue to use telegram_chat_id.
+    telegram_notification_chat_ids: str = ""
     # Optional Telegram user ID allowlist. Required when commands are enabled
     # in a group/supergroup, where a chat ID alone would authorize everyone.
     telegram_allowed_user_id: str = ""
@@ -133,6 +136,14 @@ class Settings(BaseSettings):
     @property
     def timeframe_list(self) -> list[str]:
         return [t.strip() for t in self.timeframes.split(",") if t.strip()]
+
+    @property
+    def telegram_notification_targets(self) -> list[str]:
+        configured = [item.strip() for item in self.telegram_notification_chat_ids.split(",") if item.strip()]
+        if configured:
+            return configured
+        fallback = self.telegram_chat_id.strip()
+        return [fallback] if fallback else []
 
 
 @lru_cache
