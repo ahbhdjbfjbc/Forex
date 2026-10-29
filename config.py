@@ -34,11 +34,16 @@ class Settings(BaseSettings):
     data_provider: str = "yfinance"
     scan_interval_seconds: int = 300
 
-    # 3-hour auto-scan scheduler (main.py): scans src.watchlist_store's
+    # 1-hour auto-scan scheduler (main.py): scans src.watchlist_store's
     # dynamic symbol list and only alerts on high-confidence, actively
     # triggered setups — see min_signal_confidence below.
-    auto_scan_interval_seconds: int = 10_800  # 3 hours
-    min_signal_confidence: float = 0.6
+    auto_scan_interval_seconds: int = 3_600  # 1 hour (تم التعديل من 3 ساعات إلى ساعة واحدة)
+    min_signal_confidence: float = 0.72      # تم رفع الدقة المطلوبة للتوصيات
+
+    # Alerts & News Filter Settings
+    notify_no_signals: bool = True           # إرسال تنبيه في حال التذبذب وعدم وجود توصيات جيدة
+    enable_news_filter: bool = True          # تفعيل فلتر التوقف وقت الأخبار القوية
+    news_buffer_minutes: int = 30            # التوقف قبل وبعد الخبر بـ 30 دقيقة
 
     # Webhook bridge
     webhook_host: str = "0.0.0.0"
@@ -52,6 +57,7 @@ class Settings(BaseSettings):
     # Notifications
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_channel_id: str = ""            # معرف القناة لنشر التوصيات والتنبيهات عليها
     # Optional Telegram user ID allowlist. Required when commands are enabled
     # in a group/supergroup, where a chat ID alone would authorize everyone.
     telegram_allowed_user_id: str = ""
@@ -125,6 +131,11 @@ class Settings(BaseSettings):
     @property
     def service_port(self) -> int:
         return self.port if self.port is not None else self.webhook_port
+
+    @property
+    def target_channel_id(self) -> str:
+        """يرسل إلى القناة إذا تم تحديدها، وإلا يرسل إلى معرف المحادثة الافتراضي."""
+        return self.telegram_channel_id.strip() or self.telegram_chat_id.strip()
 
     @property
     def watchlist_symbols(self) -> list[str]:
