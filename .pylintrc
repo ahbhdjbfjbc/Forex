@@ -1,0 +1,31 @@
+[MASTER]
+ignore=venv,.venv,__pycache__,.git
+jobs=0
+
+[MESSAGES CONTROL]
+disable=
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    line-too-long,
+    import-error,
+    too-few-public-methods,
+    too-many-instance-attributes,
+    too-many-locals,
+    too-many-arguments,
+    too-many-positional-arguments,
+    too-many-branches,
+    too-many-statements,
+    too-many-return-statements,
+    too-many-boolean-expressions,
+    broad-exception-caught,
+    import-outside-toplevel,
+    protected-access,
+    unused-argument,
+    raise-missing-from,
+    unspecified-encoding,
+    use-dict-literal,
+    unused-import
+
+[REPORTS]
+score=yes
