@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 
 import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from config import Settings, get_settings
-from src.notifier import send_alert
+from src.market_status import MarketCycleSummary, format_market_status
+from src.notifier import send_alert, send_telegram
 from src.paper_executor import execute_paper_trade
 from src.scanner_1_regime import scan_symbols_with_data
 from src.scanner_2_strategy import generate_signal
@@ -54,11 +56,17 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
 
     regime_data = scan_symbols_with_data(symbols, settings)
     signals_sent = 0
+    qualified_signals = 0
+    failed_deliveries = 0
     suppressed_low_confidence = 0
+    no_entry = 0
+    regimes_without_entry: Counter = Counter()
 
     for regime_result, df in regime_data:
         signal = generate_signal(regime_result, df, settings)
         if signal is None:
+            no_entry += 1
+            regimes_without_entry[regime_result.regime] += 1
             continue
         if regime_result.confidence < settings.min_signal_confidence:
             suppressed_low_confidence += 1
@@ -68,15 +76,37 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
                 regime_result.confidence, settings.min_signal_confidence,
             )
             continue
-        send_alert(signal, settings)
-        signals_sent += 1
+        qualified_signals += 1
+        delivery_results = send_alert(signal, settings)
+        if any(delivery_results.values()):
+            signals_sent += 1
+        else:
+            failed_deliveries += 1
         execute_paper_trade(signal, settings)  # no-op unless ENABLE_PAPER_TRADING=true
+
+    if settings.send_market_status:
+        status = format_market_status(
+            MarketCycleSummary(
+                symbols_count=len(symbols),
+                timeframe_count=len(settings.timeframe_list),
+                data_pairs=len(regime_data),
+                qualified_signals=qualified_signals,
+                delivered_signals=signals_sent,
+                low_confidence=suppressed_low_confidence,
+                no_entry=no_entry,
+                failed_deliveries=failed_deliveries,
+                confidence_threshold=settings.min_signal_confidence,
+                regime_counts=regimes_without_entry,
+            )
+        )
+        send_telegram(status, settings)
 
     logger.info(
         "auto-scan cycle complete: %d/%d (symbol,timeframe) pairs returned data, "
-        "%d signals dispatched, %d suppressed for low confidence",
+        "%d notifications delivered, %d signal notifications failed, "
+        "%d suppressed for low confidence",
         len(regime_data), len(symbols) * len(settings.timeframe_list),
-        signals_sent, suppressed_low_confidence,
+        signals_sent, failed_deliveries, suppressed_low_confidence,
     )
 
 

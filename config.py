@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     # triggered setups — see min_signal_confidence below.
     auto_scan_interval_seconds: int = 10_800  # 3 hours
     min_signal_confidence: float = 0.6
+    # Send one aggregate Arabic status after each automated scan cycle.
+    send_market_status: bool = True
 
     # Webhook bridge
     webhook_host: str = "0.0.0.0"
@@ -139,7 +141,12 @@ class Settings(BaseSettings):
 
     @property
     def telegram_notification_targets(self) -> list[str]:
-        configured = [item.strip() for item in self.telegram_notification_chat_ids.split(",") if item.strip()]
+        """Return explicit alert destinations, falling back to the command chat."""
+        configured = [
+            item.strip()
+            for item in self.telegram_notification_chat_ids.split(",")
+            if item.strip()
+        ]
         if configured:
             return configured
         fallback = self.telegram_chat_id.strip()

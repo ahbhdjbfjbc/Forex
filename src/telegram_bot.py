@@ -51,16 +51,20 @@ logger = logging.getLogger(__name__)
 
 _NO_TRADE_REASONS = {
     MarketRegime.LOW_LIQUIDITY_CHOP: (
-        "السيولة ضعيفة والسوق متذبذب؛ انتظر تحسّن السيولة وظهور اختراق واضح."
+        "السيولة ضعيفة والسوق متذبذب؛ انتظر تحسّن السيولة "
+        "وظهور اختراق واضح."
     ),
     MarketRegime.RANGING_CONSOLIDATION: (
-        "السعر داخل نطاق عرضي، ولا يوجد حالياً توافق كافٍ بين نطاقات بولينجر ومؤشر القوة النسبية (RSI)."
+        "السعر داخل نطاق عرضي، ولا يوجد حالياً توافق كافٍ بين "
+        "نطاقات بولينجر ومؤشر القوة النسبية (RSI)."
     ),
     MarketRegime.STRONG_TREND_BULLISH: (
-        "الاتجاه صاعد، لكن لم يظهر ارتداد مؤكد إلى المتوسط المتحرك الأسي 20؛ انتظر فرصة أوضح."
+        "الاتجاه صاعد، لكن لم يظهر ارتداد مؤكد إلى المتوسط المتحرك "
+        "الأسي 20؛ انتظر فرصة أوضح."
     ),
     MarketRegime.STRONG_TREND_BEARISH: (
-        "الاتجاه هابط، لكن لم يظهر ارتداد مؤكد إلى المتوسط المتحرك الأسي 20؛ انتظر فرصة أوضح."
+        "الاتجاه هابط، لكن لم يظهر ارتداد مؤكد إلى المتوسط المتحرك "
+        "الأسي 20؛ انتظر فرصة أوضح."
     ),
     MarketRegime.HIGH_VOLATILITY_EXPANSION: (
         "التقلبات مرتفعة، لكن لم يتأكد اختراق النطاق مع حجم تداول داعم. انتظر تأكيداً."
@@ -87,7 +91,9 @@ _STRATEGY_NAME_AR = {
 }
 
 _PARAMETER_NAME_AR = {
-    "rsi_bullish_ceiling": "الحد الأعلى للقوة النسبية في الاتجاه الصاعد",
+    "rsi_bullish_ceiling": (
+        "الحد الأعلى للقوة النسبية في الاتجاه الصاعد"
+    ),
     "atr_sl_multiplier": "مضاعف متوسط المدى الحقيقي لوقف الخسارة",
     "rsi_oversold": "حد التشبع البيعي لمؤشر القوة النسبية",
     "rsi_overbought": "حد التشبع الشرائي لمؤشر القوة النسبية",
@@ -105,7 +111,10 @@ def _format_found_report(
     tf_tag = "/".join(tf.upper() for tf in scanned_tfs) or primary_tf.upper()
 
     if kind == "FX":
-        sl_line = f"🛑 وقف الخسارة: {signal.stop_loss_price} (-{signal.stop_loss_pips:g} نقطة)"
+        sl_line = (
+            f"🛑 وقف الخسارة: {signal.stop_loss_price} "
+            f"(-{signal.stop_loss_pips:g} نقطة)"
+        )
         tp1_line = (
             f"🎯 الهدف الأول: {signal.take_profit_1_price} "
             f"(+{signal.take_profit_1_pips:g} نقطة | عائد/مخاطرة 1:{signal.take_profit_1_rr:g})"
@@ -116,32 +125,49 @@ def _format_found_report(
         )
         size_line = (
             f"📦 حجم الصفقة المقترح: {signal.risk.lot_size:g} لوت "
-            f"(مخاطرة {signal.risk.risk_percent:g}% من حساب ${signal.risk.account_size_usd:,.0f})"
+            f"(مخاطرة {signal.risk.risk_percent:g}% من حساب "
+            f"${signal.risk.account_size_usd:,.0f})"
         )
     else:
-        unit_label = "بيتكوين" if symbol.startswith("BTC") else "إيثيريوم" if symbol.startswith("ETH") else \
-            "أونصة" if kind == "METAL" else "وحدة"
-        sl_line = f"🛑 وقف الخسارة: {signal.stop_loss_price} (مسافة السعر {signal.stop_loss_pips:g})"
+        if symbol.startswith("BTC"):
+            unit_label = "بيتكوين"
+        elif symbol.startswith("ETH"):
+            unit_label = "إيثيريوم"
+        elif kind == "METAL":
+            unit_label = "أونصة"
+        else:
+            unit_label = "وحدة"
+        sl_line = (
+            f"🛑 وقف الخسارة: {signal.stop_loss_price} "
+            f"(مسافة السعر {signal.stop_loss_pips:g})"
+        )
         tp1_line = (
             f"🎯 الهدف الأول: {signal.take_profit_1_price} "
-            f"(مسافة السعر {signal.take_profit_1_pips:g} | عائد/مخاطرة 1:{signal.take_profit_1_rr:g})"
+            f"(مسافة السعر {signal.take_profit_1_pips:g} | "
+            f"عائد/مخاطرة 1:{signal.take_profit_1_rr:g})"
         )
         tp2_line = (
             f"🎯 الهدف الثاني: {signal.take_profit_2_price} "
-            f"(مسافة السعر {signal.take_profit_2_pips:g} | عائد/مخاطرة 1:{signal.take_profit_2_rr:g})"
+            f"(مسافة السعر {signal.take_profit_2_pips:g} | "
+            f"عائد/مخاطرة 1:{signal.take_profit_2_rr:g})"
         )
         size_line = (
             f"📦 الحجم الاسترشادي: {signal.risk.lot_size:g} {unit_label} "
-            f"(مخاطرة {signal.risk.risk_percent:g}% من حساب ${signal.risk.account_size_usd:,.0f})"
+            f"(مخاطرة {signal.risk.risk_percent:g}% من حساب "
+            f"${signal.risk.account_size_usd:,.0f})"
         )
 
     return "\n".join(
         [
             f"📊 تقرير تحليل: {display_pair(symbol)}",
             "----------------------------------",
-            f"🔍 حالة السوق: {REGIME_LABELS.get(regime_result.regime, regime_result.regime.value)} ({tf_tag})",
+            f"🔍 حالة السوق: "
+            f"{REGIME_LABELS.get(regime_result.regime, regime_result.regime.value)} "
+            f"({tf_tag})",
             f"⚡ الاستراتيجية: {strategy_label}",
-            f"🎯 التوصية: {DIRECTION_LABELS.get(signal.direction, signal.direction.value)} {direction_emoji}",
+            f"🎯 التوصية: "
+            f"{DIRECTION_LABELS.get(signal.direction, signal.direction.value)} "
+            f"{direction_emoji}",
             "",
             f"📈 سعر الدخول: {signal.entry_price}",
             sl_line,
@@ -149,7 +175,8 @@ def _format_found_report(
             tp2_line,
             size_line,
             "----------------------------------",
-            f"💡 المؤشرات: قوة الاتجاه (ADX) = {regime_result.metrics.adx:.1f} | "
+            f"💡 المؤشرات: قوة الاتجاه (ADX) = "
+            f"{regime_result.metrics.adx:.1f} | "
             f"متوسط المدى الحقيقي (ATR) = {regime_result.metrics.atr:.5f} | "
             f"القوة النسبية (RSI) = {rsi_val:.0f}",
         ]
@@ -167,7 +194,9 @@ def _format_no_trade_report(
         [
             f"📊 تقرير تحليل: {display_pair(symbol)}",
             "----------------------------------",
-            f"🔍 حالة السوق: {REGIME_LABELS.get(regime_result.regime, regime_result.regime.value)} ({tf_tag})",
+            f"🔍 حالة السوق: "
+            f"{REGIME_LABELS.get(regime_result.regime, regime_result.regime.value)} "
+            f"({tf_tag})",
             "⚡ الاستراتيجية: لا توجد استراتيجية مناسبة الآن",
             "⚠️ القرار: لا تدخل صفقة حالياً 🔴",
             "",
@@ -284,7 +313,10 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if symbol is None:
         await update.message.reply_text(f"الرمز '{raw}' غير معروف أو غير صالح.\n{_USAGE}")
     elif was_new:
-        await update.message.reply_text(f"✅ أُضيف {display_pair(symbol)} إلى قائمة المسح كل 3 ساعات.")
+        await update.message.reply_text(
+            f"✅ أُضيف {display_pair(symbol)} إلى قائمة المسح "
+            "كل 3 ساعات."
+        )
     else:
         await update.message.reply_text(f"{display_pair(symbol)} موجود بالفعل في قائمة المسح.")
 
@@ -321,7 +353,10 @@ def _format_paper_status(settings: Settings) -> str:
         f"الصفقات المفتوحة: {len(trades)}",
     ]
     for t in trades[:10]:
-        lines.append(f"  • {t.get('instrument')}، الوحدات {t.get('currentUnits')}، السعر {t.get('price')}")
+        lines.append(
+            f"  • {t.get('instrument')}، الوحدات {t.get('currentUnits')}، "
+            f"السعر {t.get('price')}"
+        )
     return "\n".join(lines)
 
 
@@ -389,7 +424,10 @@ def run_evolution(strategy_name: str, symbol: str, timeframe: str, settings: Set
         candidates = evolver.evolve_strategy(strategy_name, symbol, timeframe, grid, settings, lookback_months=6)
     except Exception:
         logger.exception("evolution run failed for %s/%s/%s", strategy_name, symbol, timeframe)
-        return f"⚠️ تعذّر اختبار الاستراتيجية لـ{display_pair(symbol)} ({timeframe.upper()}). راجع سجلات الخدمة."
+        return (
+            f"⚠️ تعذّر اختبار الاستراتيجية لـ{display_pair(symbol)} "
+            f"({timeframe.upper()}). راجع سجلات الخدمة."
+        )
 
     if not candidates:
         return (

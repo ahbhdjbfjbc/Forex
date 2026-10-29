@@ -109,7 +109,12 @@ environment variables, persistent storage, and health-check settings.
   `watchlist_store`'s symbols through Scanner 1 -> Scanner 2 and pushes a
   Telegram/Discord alert only for setups that are both actively triggered
   *and* at or above `MIN_SIGNAL_CONFIDENCE` (default 0.6) — everything else,
-  including any `LOW_LIQUIDITY_CHOP` regime, stays silent. Also serves the
+  including any `LOW_LIQUIDITY_CHOP` regime, does not receive a trade alert.
+  By default, it also sends one aggregate Arabic status message per cycle with
+  counts for no-entry, low-confidence, and unavailable-data cases; set
+  `SEND_MARKET_STATUS=false` to turn off only these status messages. A live
+  economic-news filter is not included until a data provider is configured.
+  Also serves the
   webhook bridge + the Telegram bot concurrently in the same asyncio event
   loop. If `ENABLE_PAPER_TRADING=true`, each dispatched signal is also
   mirrored to an OANDA practice account.

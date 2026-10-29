@@ -56,24 +56,48 @@ def format_message(signal: TradeSignal) -> str:
 
     if instrument_type(signal.symbol) == "FX":
         sl_text = f"وقف الخسارة: {signal.stop_loss_price} (-{signal.stop_loss_pips:g} نقطة)"
-        tp1_text = (f"الهدف الأول: {signal.take_profit_1_price} "
-                    f"(+{signal.take_profit_1_pips:g} نقطة، عائد/مخاطرة 1:{signal.take_profit_1_rr:g})")
-        tp2_text = (f"الهدف الثاني: {signal.take_profit_2_price} "
-                    f"(+{signal.take_profit_2_pips:g} نقطة، عائد/مخاطرة 1:{signal.take_profit_2_rr:g})")
+        tp1_text = (
+            f"الهدف الأول: {signal.take_profit_1_price} "
+            f"(+{signal.take_profit_1_pips:g} نقطة، عائد/مخاطرة 1:{signal.take_profit_1_rr:g})"
+        )
+        tp2_text = (
+            f"الهدف الثاني: {signal.take_profit_2_price} "
+            f"(+{signal.take_profit_2_pips:g} نقطة، عائد/مخاطرة 1:{signal.take_profit_2_rr:g})"
+        )
         size_text = f"حجم الصفقة المقترح: {signal.risk.lot_size:g} لوت قياسي"
     else:
-        unit = "بيتكوين" if signal.symbol.upper().startswith("BTC") else "إيثيريوم" if signal.symbol.upper().startswith("ETH") else "أونصة" if instrument_type(signal.symbol) == "METAL" else "وحدة"
-        sl_text = f"وقف الخسارة: {signal.stop_loss_price} (مسافة السعر {signal.stop_loss_pips:g})"
-        tp1_text = (f"الهدف الأول: {signal.take_profit_1_price} "
-                    f"(مسافة السعر {signal.take_profit_1_pips:g}، عائد/مخاطرة 1:{signal.take_profit_1_rr:g})")
-        tp2_text = (f"الهدف الثاني: {signal.take_profit_2_price} "
-                    f"(مسافة السعر {signal.take_profit_2_pips:g}، عائد/مخاطرة 1:{signal.take_profit_2_rr:g})")
-        size_text = f"الحجم الاسترشادي: {signal.risk.lot_size:g} {unit} (قد يختلف حسب عقد الوسيط)"
+        if signal.symbol.upper().startswith("BTC"):
+            unit = "بيتكوين"
+        elif signal.symbol.upper().startswith("ETH"):
+            unit = "إيثيريوم"
+        elif instrument_type(signal.symbol) == "METAL":
+            unit = "أونصة"
+        else:
+            unit = "وحدة"
+        sl_text = (
+            f"وقف الخسارة: {signal.stop_loss_price} "
+            f"(مسافة السعر {signal.stop_loss_pips:g})"
+        )
+        tp1_text = (
+            f"الهدف الأول: {signal.take_profit_1_price} "
+            f"(مسافة السعر {signal.take_profit_1_pips:g}، "
+            f"عائد/مخاطرة 1:{signal.take_profit_1_rr:g})"
+        )
+        tp2_text = (
+            f"الهدف الثاني: {signal.take_profit_2_price} "
+            f"(مسافة السعر {signal.take_profit_2_pips:g}، "
+            f"عائد/مخاطرة 1:{signal.take_profit_2_rr:g})"
+        )
+        size_text = (
+            f"الحجم الاسترشادي: {signal.risk.lot_size:g} {unit} "
+            "(قد يختلف حسب عقد الوسيط)"
+        )
 
     lines = [
         "🚨 توصية تداول جديدة 🚨",
         f"الزوج: {format_pair(signal.symbol)}",
-        f"الاتجاه: {DIRECTION_LABELS.get(signal.direction, signal.direction.value)} {direction_emoji}",
+        f"الاتجاه: {DIRECTION_LABELS.get(signal.direction, signal.direction.value)} "
+        f"{direction_emoji}",
         f"حالة السوق: {regime_label} ({tf_label})",
         f"الاستراتيجية: {strategy_label}",
         "------------------------------",
@@ -81,7 +105,9 @@ def format_message(signal: TradeSignal) -> str:
         sl_text,
         tp1_text,
         tp2_text,
-        size_text + f" (المخاطرة {signal.risk.risk_percent:g}% من حساب ${signal.risk.account_size_usd:,.0f})",
+        size_text
+        + f" (المخاطرة {signal.risk.risk_percent:g}% من حساب "
+        + f"${signal.risk.account_size_usd:,.0f})",
         "------------------------------",
         f"الوقت: {signal.timestamp.strftime('%Y-%m-%d %H:%M:%S')} بتوقيت UTC",
     ]
@@ -106,7 +132,10 @@ def send_telegram(message: str, settings: Settings) -> bool:
         except httpx.HTTPError as exc:
             logger.error("telegram send failed (%s)", type(exc).__name__)
     if delivered != len(targets):
-        logger.warning("telegram delivery succeeded for %d of %d configured targets", delivered, len(targets))
+        logger.warning(
+            "telegram delivery succeeded for %d of %d configured targets",
+            delivered, len(targets),
+        )
     return delivered > 0
 
 
