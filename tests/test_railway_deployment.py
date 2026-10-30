@@ -74,6 +74,11 @@ def test_telegram_polling_preserves_updates_received_during_restart(monkeypatch)
     import main as app
 
     polling_calls = []
+    published_commands = []
+
+    class FakeBot:
+        async def set_my_commands(self, commands):
+            published_commands.extend(command.command for command in commands)
 
     class FakeUpdater:
         async def start_polling(self, **kwargs):
@@ -84,6 +89,7 @@ def test_telegram_polling_preserves_updates_received_during_restart(monkeypatch)
 
     class FakeTelegramApplication:
         updater = FakeUpdater()
+        bot = FakeBot()
 
         async def initialize(self):
             pass
@@ -114,6 +120,75 @@ def test_telegram_polling_preserves_updates_received_during_restart(monkeypatch)
         "allowed_updates": ["message", "callback_query"],
         "drop_pending_updates": False,
     }]
+    assert "start" in published_commands
+    assert "menu" in published_commands
+    assert "scan" in published_commands
+
+
+def test_telegram_command_menu_api_failure_does_not_disable_polling(monkeypatch) -> None:
+    import main as app
+
+    polling_calls = []
+
+    class FakeBot:
+        async def set_my_commands(self, _commands):
+            raise RuntimeError("simulated Bot API failure")
+
+    class FakeUpdater:
+        async def start_polling(self, **kwargs):
+            polling_calls.append(kwargs)
+
+        async def stop(self):
+            pass
+
+    class FakeTelegramApplication:
+        updater = FakeUpdater()
+        bot = FakeBot()
+
+        async def initialize(self):
+            pass
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+        async def shutdown(self):
+            pass
+
+    class FakeServer:
+        def __init__(self, _config):
+            pass
+
+        async def serve(self):
+            pass
+
+    monkeypatch.setattr(app, "build_telegram_application", lambda _settings: FakeTelegramApplication())
+    monkeypatch.setattr(app.uvicorn, "Config", lambda *args, **kwargs: object())
+    monkeypatch.setattr(app.uvicorn, "Server", FakeServer)
+
+    asyncio.run(app._run_webhook_and_telegram(Settings(_env_file=None, telegram_bot_token="test-token")))
+
+    assert len(polling_calls) == 1
+
+
+def test_control_panel_commands_are_registered_with_telegram_application() -> None:
+    from telegram.ext import CommandHandler
+    from src.telegram_bot import build_telegram_application
+
+    application = build_telegram_application(
+        Settings(_env_file=None, telegram_bot_token="123:TEST")
+    )
+    registered = {
+        command
+        for handlers in application.handlers.values()
+        for handler in handlers
+        if isinstance(handler, CommandHandler)
+        for command in handler.commands
+    }
+
+    assert {"start", "menu", "scan", "scan_all"} <= registered
 
 
 def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:

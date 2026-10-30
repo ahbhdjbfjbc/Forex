@@ -12,6 +12,7 @@ from dataclasses import asdict
 
 try:
     from telegram import (
+        BotCommand,
         InlineKeyboardButton,
         InlineKeyboardMarkup,
         KeyboardButton,
@@ -28,6 +29,7 @@ try:
     )
     _TELEGRAM_IMPORT_ERROR: ImportError | None = None
 except ImportError as exc:
+    BotCommand = None
     Update = object
     Application = None
     CallbackQueryHandler = None
@@ -149,6 +151,7 @@ _USAGE = (
     "يمكنك التحكم الكامل بالبوت عبر الأزرار التفاعلية بالأسفل دون الحاجة للكتابة، "
     "أو إرسال اسم الزوج مباشرة بالعربية أو الإنجليزية (مثل: ذهب، يورو، EURUSD، XAUUSD).\n\n"
     "📌 الأوامر المتاحة:\n"
+    "• /menu — فتح لوحة التحكم والأزرار\n"
     "• /scan — فتح قائمة الأزرار لفحص أي زوج بضغطة زر\n"
     "• /scan_all — فحص شامل لجميع الأزواج في القائمة الآن\n"
     "• /watchlist — عرض وإدارة قائمة المراقبة التلقائية (كل ساعة)\n"
@@ -162,6 +165,28 @@ _USAGE = (
     "----------------------------------\n"
     f"{DEVELOPER_CREDIT}"
 )
+
+_TELEGRAM_COMMANDS = [
+    ("start", "فتح لوحة التحكم"),
+    ("menu", "فتح لوحة التحكم والأزرار"),
+    ("scan", "فحص زوج أو فتح قائمة الأزواج"),
+    ("scan_all", "فحص قائمة المراقبة كاملة"),
+    ("watchlist", "عرض وإدارة قائمة المراقبة"),
+    ("add", "إضافة زوج إلى قائمة المراقبة"),
+    ("remove", "حذف زوج من قائمة المراقبة"),
+    ("status", "عرض حالة البوت والإعدادات"),
+    ("help", "عرض دليل الاستخدام"),
+]
+
+
+async def publish_telegram_command_menu(bot) -> None:
+    """Publish Telegram's slash-command menu without blocking bot startup on API errors."""
+    if BotCommand is None:
+        return
+    try:
+        await bot.set_my_commands([BotCommand(name, description) for name, description in _TELEGRAM_COMMANDS])
+    except Exception as exc:
+        logger.warning("could not publish Telegram command menu (%s)", type(exc).__name__)
 
 
 def _resolve_input_symbol(raw_text: str) -> str | None:
@@ -1054,6 +1079,7 @@ def build_telegram_application(settings: Settings | None = None) -> Application:
     settings = settings or get_settings()
     application = Application.builder().token(settings.telegram_bot_token).build()
     application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("menu", cmd_start))
     application.add_handler(CommandHandler("help", cmd_start))
     application.add_handler(CommandHandler("scan", cmd_scan))
     application.add_handler(CommandHandler("scan_all", cmd_scan_all))

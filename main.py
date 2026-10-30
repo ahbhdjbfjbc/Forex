@@ -44,7 +44,7 @@ from src.notifier import (
 from src.paper_executor import execute_paper_trade
 from src.scanner_1_regime import scan_symbols_with_data
 from src.scanner_2_strategy import generate_signal
-from src.telegram_bot import build_telegram_application
+from src.telegram_bot import build_telegram_application, publish_telegram_command_menu
 from src.tradingview_bridge import app as webhook_app
 from src.watchlist_store import watchlist_store
 
@@ -220,6 +220,7 @@ async def _run_webhook_and_telegram(settings: Settings) -> None:
     if settings.telegram_bot_token:
         telegram_app = build_telegram_application(settings)
         await telegram_app.initialize()
+        await publish_telegram_command_menu(telegram_app.bot)
         await telegram_app.start()
         await telegram_app.updater.start_polling(
             allowed_updates=["message", "callback_query"],
