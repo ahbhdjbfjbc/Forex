@@ -63,6 +63,8 @@ from src.watchlist_store import watchlist_store
 
 logger = logging.getLogger(__name__)
 
+DEVELOPER_CREDIT = "👨‍💻 المطور: Abodi sy"
+
 # اختصارات عربية لتسهيل البحث السريع بدون كتابة رموز إنجليزية
 _ARABIC_SYMBOL_ALIASES: dict[str, str] = {
     "ذهب": "XAUUSD",
@@ -143,20 +145,22 @@ _NO_TRADE_REASONS = {
 }
 
 _USAGE = (
-    "🤖 **مرحباً بك في بوت المسح والتوصيات الاحترافي**\n"
-    "يمكنك التحكم الكامل بالبوت عبر **الأزرار التفاعلية بالأسفل** دون الحاجة للكتابة، "
-    "أو إرسال اسم الزوج مباشرة بالعربية أو الإنجليزية (مثل: `ذهب`، `يورو`، `EURUSD`، `XAUUSD`).\n\n"
-    "📌 **الأوامر المتاحة:**\n"
-    "• `/scan` — فتح قائمة الأزرار لفحص أي زوج بضغطة زر\n"
-    "• `/scan_all` — فحص شامل لجميع الأزواج في القائمة الآن\n"
-    "• `/watchlist` — عرض وإدارة قائمة المراقبة التلقائية (كل ساعة)\n"
-    "• `/add <الرمز>` — إضافة زوج إلى قائمة الفحص التلقائي\n"
-    "• `/remove <الرمز>` — حذف زوج من قائمة الفحص التلقائي\n"
-    "• `/status` — عرض حالة البوت والإعدادات وفلتر الأخبار\n"
-    "• `/channel_test` — اختبار إرسال رسالة إلى القناة\n"
-    "• `/paper_status` — عرض رصيد الحساب التجريبي (OANDA) والصفقات المفتوحة\n"
-    "• `/evolve` — اختبار وتطوير إعدادات الاستراتيجيات تاريخياً\n"
-    "• `/apply <رقم_المقترح>` — اعتماد إعدادات استراتيجية ناجحة"
+    "🤖 مَرحباً بك في بوت المسح والتوصيات الاحترافي\n"
+    "يمكنك التحكم الكامل بالبوت عبر الأزرار التفاعلية بالأسفل دون الحاجة للكتابة، "
+    "أو إرسال اسم الزوج مباشرة بالعربية أو الإنجليزية (مثل: ذهب، يورو، EURUSD، XAUUSD).\n\n"
+    "📌 الأوامر المتاحة:\n"
+    "• /scan — فتح قائمة الأزرار لفحص أي زوج بضغطة زر\n"
+    "• /scan_all — فحص شامل لجميع الأزواج في القائمة الآن\n"
+    "• /watchlist — عرض وإدارة قائمة المراقبة التلقائية (كل ساعة)\n"
+    "• /add <الرمز> — إضافة زوج إلى قائمة الفحص التلقائي\n"
+    "• /remove <الرمز> — حذف زوج من قائمة الفحص التلقائي\n"
+    "• /status — عرض حالة البوت والإعدادات وفلتر الأخبار\n"
+    "• /channel_test — اختبار إرسال رسالة إلى القناة\n"
+    "• /paper_status — عرض رصيد الحساب التجريبي (OANDA) والصفقات المفتوحة\n"
+    "• /evolve — اختبار وتطوير إعدادات الاستراتيجيات تاريخياً\n"
+    "• /apply <رقم_المقترح> — اعتماد إعدادات استراتيجية ناجحة\n"
+    "----------------------------------\n"
+    f"{DEVELOPER_CREDIT}"
 )
 
 
@@ -192,7 +196,6 @@ def _build_quick_scan_inline_keyboard():
     buttons = []
     row = []
 
-    # أزواج قائمة المراقبة أولاً
     seen = set()
     for sym in watchlist_syms:
         clean_sym = sym.replace("=X", "")
@@ -205,7 +208,6 @@ def _build_quick_scan_inline_keyboard():
         buttons.append(row)
         row = []
 
-    # إضافة الأزواج الشهيرة غير الموجودة في القائمة
     for label, sym in _POPULAR_SYMBOLS:
         if sym not in seen:
             row.append(InlineKeyboardButton(label, callback_data=f"scan:{sym}"))
@@ -343,6 +345,7 @@ def _format_found_report(
             "----------------------------------",
             f"💡 المؤشرات الفنية: ADX = {regime_result.metrics.adx:.1f} | "
             f"ATR = {regime_result.metrics.atr:.5f} | RSI = {rsi_val:.0f}",
+            f"{DEVELOPER_CREDIT}",
         ]
     )
 
@@ -364,6 +367,8 @@ def _format_no_trade_report(
             "⚠️ التوصية: عدم التداول حالياً (انتظار) 🔴",
             "",
             f"💡 السبب الفني: {reason}",
+            "----------------------------------",
+            f"{DEVELOPER_CREDIT}",
         ]
     )
 
@@ -394,7 +399,7 @@ def run_on_demand_scan(raw_text: str, settings: Settings | None = None) -> str:
             "تأكد من صحة رمز الزوج أو حاول مرة أخرى بعد قليل."
         )
 
-    watchlist_store.add(symbol)  # إضافة الزوج تلقائياً لقائمة المراقبة
+    watchlist_store.add(symbol)
 
     effective_primary_tf = primary_tf if primary_tf in scanned else next(iter(scanned))
     regime_result, df = scanned[effective_primary_tf]
@@ -434,31 +439,32 @@ def run_full_watchlist_scan(settings: Settings | None = None) -> str:
             ranging_or_waiting.append(f"⏳ {pair_str}: {reg_label}")
 
     lines = [
-        "🚀 **تقرير الفحص الشامل للسوق** 🚀",
+        "🚀 تقرير الفحص الشامل للسوق 🚀",
         f"🔍 تم فحص ({len(regime_data)}) من الأزواج والأطر الزمنية:",
         "----------------------------------",
     ]
     if found_signals:
-        lines.append("🎯 **الفرص المكتملة (تم إرسالها للقناة):**")
+        lines.append("🎯 الفرص المكتملة (تم إرسالها للقناة):")
         lines.extend(found_signals)
         lines.append("----------------------------------")
     else:
-        lines.append("⚠️ **لا توجد فرص مكتملة الشروط عالية الدقة في هذه اللحظة.**")
+        lines.append("⚠️ لا توجد فرص مكتملة الشروط عالية الدقة في هذه اللحظة.")
         lines.append("----------------------------------")
 
-    lines.append("📊 **حالة باقي الأزواج (انتظار / تذبذب):**")
+    lines.append("📊 حالة باقي الأزواج (انتظار / تذبذب):")
     lines.extend(ranging_or_waiting[:15])
     if len(ranging_or_waiting) > 15:
         lines.append(f"... و ({len(ranging_or_waiting) - 15}) من الأطر الزمنية الأخرى في حالة انتظار.")
+    lines.append("----------------------------------")
+    lines.append(DEVELOPER_CREDIT)
 
     return "\n".join(lines)
 
 
 def _is_authorized(update: Update, settings: Settings) -> bool:
+    """يتحقق من صلاحية المستخدم؛ يقبل المحادثة الخاصة لمالك البوت حتى لو تم وضع معرف القناة في الإعدادات."""
     chat = update.effective_chat
-    if chat is None or not settings.telegram_chat_id:
-        return False
-    if str(chat.id) != str(settings.telegram_chat_id):
+    if chat is None:
         return False
 
     allowed_user_id = str(getattr(settings, "telegram_allowed_user_id", "") or "").strip()
@@ -466,26 +472,52 @@ def _is_authorized(update: Update, settings: Settings) -> bool:
     if allowed_user_id:
         return user is not None and str(user.id) == allowed_user_id
 
-    return getattr(chat, "type", "private") == "private"
+    configured_chat = str(settings.telegram_chat_id or "").strip()
+    chat_type = getattr(chat, "type", "private")
+
+    # إذا لم يتم ضبط معرف محادثة أو وضع المستخدم معرف القناة (@ أو -100) مكان المحادثة الخاصة،
+    # نسمح بالتحكم عبر المحادثة الخاصة (Private) حتى تستجيب لوحة التحكم فوراً
+    if not configured_chat or configured_chat.startswith("@") or configured_chat.startswith("-100"):
+        return chat_type == "private"
+
+    if str(chat.id) == configured_chat:
+        return True
+
+    return False
+
+
+async def _reply_target(update: Update):
+    """يرجع الكائن المناسب للرد سواء كانت ضغطة زر أو رسالة عادية."""
+    if getattr(update, "message", None) is not None:
+        return update.message
+    query = getattr(update, "callback_query", None)
+    if query is not None and getattr(query, "message", None) is not None:
+        return query.message
+    return None
 
 
 async def _handle_scan_request(update: Update, settings: Settings, raw_text: str) -> None:
     if not _is_authorized(update, settings):
         logger.warning("ignoring on-demand scan request from unauthorized Telegram sender")
         return
-    if not update.message:
+    msg_target = await _reply_target(update)
+    if not msg_target:
         return
 
     symbol = _resolve_input_symbol(raw_text)
     wait_msg = None
     if symbol:
-        wait_msg = await update.message.reply_text(
-            f"⏳ جاري فحص **{display_pair(symbol)}** وتحليل المؤشرات الفنية بدقة..."
+        wait_msg = await msg_target.reply_text(
+            f"⏳ جاري فحص {display_pair(symbol)} وتحليل المؤشرات الفنية بدقة..."
         )
 
     report = await asyncio.to_thread(run_on_demand_scan, raw_text, settings)
     has_signal = "🎯 التوصية: دخول صفقة" in report
-    reply_markup = _build_report_action_keyboard(symbol, has_signal) if symbol else _build_quick_scan_inline_keyboard()
+    reply_markup = (
+        _build_report_action_keyboard(symbol, has_signal)
+        if symbol
+        else _build_quick_scan_inline_keyboard()
+    )
 
     if wait_msg:
         try:
@@ -493,29 +525,31 @@ async def _handle_scan_request(update: Update, settings: Settings, raw_text: str
         except Exception:
             pass
 
-    await update.message.reply_text(report, reply_markup=reply_markup)
+    await msg_target.reply_text(report, reply_markup=reply_markup)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     if not _is_authorized(update, settings):
         return
-    if update.message:
-        await update.message.reply_text(
-            f"✅ **بوت توصيات الفوركس الاحترافي متصل ويعمل بنجاح!**\n\n{_USAGE}",
+    msg_target = await _reply_target(update)
+    if msg_target:
+        await msg_target.reply_text(
+            f"✅ بوت توصيات الفوركس الاحترافي متصل ويعمل بنجاح!\n\n{_USAGE}",
             reply_markup=_build_main_reply_keyboard(),
         )
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings) or not msg_target:
         return
-    raw_text = " ".join(context.args) if context.args else ""
+    raw_text = " ".join(context.args) if getattr(context, "args", None) else ""
     if not raw_text:
-        await update.message.reply_text(
-            "🔍 **اختر الزوج الذي تريد فحصه الآن بضغطة زر:**\n"
-            "(أو اكتب اسم الزوج مباشرة مثل: `ذهب` أو `EURUSD`)",
+        await msg_target.reply_text(
+            "🔍 اختر الزوج الذي تريد فحصه الآن بضغطة زر:\n"
+            "(أو اكتب اسم الزوج مباشرة مثل: ذهب أو EURUSD)",
             reply_markup=_build_quick_scan_inline_keyboard(),
         )
         return
@@ -524,9 +558,10 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_scan_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings) or not msg_target:
         return
-    wait_msg = await update.message.reply_text(
+    wait_msg = await msg_target.reply_text(
         "🚀 جاري إجراء فحص شامل لجميع الأزواج في قائمة المراقبة... يرجى الانتظار لحظات."
     )
     report = await asyncio.to_thread(run_full_watchlist_scan, settings)
@@ -534,26 +569,27 @@ async def cmd_scan_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await wait_msg.delete()
     except Exception:
         pass
-    await update.message.reply_text(report, reply_markup=_build_quick_scan_inline_keyboard())
+    await msg_target.reply_text(report, reply_markup=_build_quick_scan_inline_keyboard())
 
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings) or not msg_target:
         return
     symbols = watchlist_store.get_all()
     interval_hours = max(1, settings.auto_scan_interval_seconds // 3600)
     if not symbols:
-        await update.message.reply_text(
+        await msg_target.reply_text(
             "⚠️ قائمة الفحص التلقائي فارغة حالياً. اضغط على الزر بالأسفل لإضافة الأزواج الشهيرة فوراً:",
             reply_markup=_build_add_symbols_inline_keyboard(),
         )
         return
     lines = [
-        f"📋 **قائمة المراقبة التلقائية ({len(symbols)} أزواج — تُفحص كل {interval_hours} ساعة):**",
+        f"📋 قائمة المراقبة التلقائية ({len(symbols)} أزواج — تُفحص كل {interval_hours} ساعة):",
         "اضغط على أي زوج لفحصه فوراً أو حذفه من القائمة:",
     ]
-    await update.message.reply_text(
+    await msg_target.reply_text(
         "\n".join(lines),
         reply_markup=_build_watchlist_inline_keyboard(),
     )
@@ -561,61 +597,63 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings) or not msg_target:
         return
-    raw = " ".join(context.args) if context.args else ""
+    raw = " ".join(context.args) if getattr(context, "args", None) else ""
     if not raw:
-        await update.message.reply_text(
-            "➕ **اختر الأزواج التي تريد إضافتها لقائمة المراقبة بضغطة زر:**",
+        await msg_target.reply_text(
+            "➕ اختر الأزواج التي تريد إضافتها لقائمة المراقبة بضغطة زر:",
             reply_markup=_build_add_symbols_inline_keyboard(),
         )
         return
     resolved = _resolve_input_symbol(raw) or raw
     symbol, was_new = watchlist_store.add(resolved)
     if symbol is None:
-        await update.message.reply_text(
+        await msg_target.reply_text(
             f"⚠️ الرمز '{raw}' غير صالح.\nاختر من القائمة التالية:",
             reply_markup=_build_add_symbols_inline_keyboard(),
         )
     elif was_new:
-        await update.message.reply_text(
-            f"✅ تمت إضافة **{display_pair(symbol)}** إلى قائمة الفحص الدوري (كل ساعة).",
+        await msg_target.reply_text(
+            f"✅ تمت إضافة {display_pair(symbol)} إلى قائمة الفحص الدوري (كل ساعة).",
             reply_markup=_build_watchlist_inline_keyboard(),
         )
     else:
-        await update.message.reply_text(
-            f"ℹ️ الزوج **{display_pair(symbol)}** موجود بالفعل في قائمة المراقبة.",
+        await msg_target.reply_text(
+            f"ℹ️ الزوج {display_pair(symbol)} موجود بالفعل في قائمة المراقبة.",
             reply_markup=_build_watchlist_inline_keyboard(),
         )
 
 
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings) or not msg_target:
         return
-    raw = " ".join(context.args) if context.args else ""
+    raw = " ".join(context.args) if getattr(context, "args", None) else ""
     if not raw:
-        await update.message.reply_text(
-            "🗑️ لحذف زوج، اضغط على زر **🗑️ حذف** بجانب اسم الزوج في القائمة:",
+        await msg_target.reply_text(
+            "🗑️ لحذف زوج، اضغط على زر 🗑️ حذف بجانب اسم الزوج في القائمة:",
             reply_markup=_build_watchlist_inline_keyboard(),
         )
         return
     resolved = _resolve_input_symbol(raw) or raw
     symbol, was_removed = watchlist_store.remove(resolved)
     if symbol is None:
-        await update.message.reply_text(f"⚠️ الرمز '{raw}' غير صالح.")
+        await msg_target.reply_text(f"⚠️ الرمز '{raw}' غير صالح.")
     elif was_removed:
-        await update.message.reply_text(
-            f"🗑️ تم حذف **{display_pair(symbol)}** من قائمة الفحص التلقائي.",
+        await msg_target.reply_text(
+            f"🗑️ تم حذف {display_pair(symbol)} من قائمة الفحص التلقائي.",
             reply_markup=_build_watchlist_inline_keyboard(),
         )
     else:
-        await update.message.reply_text(f"ℹ️ الزوج **{display_pair(symbol)}** غير موجود في القائمة.")
+        await msg_target.reply_text(f"ℹ️ الزوج {display_pair(symbol)} غير موجود في القائمة.")
 
 
 def _format_paper_status(settings: Settings) -> str:
     if not settings.enable_paper_trading:
-        return "ℹ️ التداول التجريبي غير مفعل حالياً (`ENABLE_PAPER_TRADING=false`)."
+        return "ℹ️ التداول التجريبي غير مفعل حالياً (ENABLE_PAPER_TRADING=false)."
     try:
         summary = oanda_client.get_account_summary(settings)
         trades = oanda_client.get_open_trades(settings)
@@ -624,7 +662,7 @@ def _format_paper_status(settings: Settings) -> str:
 
     account = summary.get("account", {})
     lines = [
-        "📄 **حالة الحساب التجريبي (OANDA Practice):**",
+        "📄 حالة الحساب التجريبي (OANDA Practice):",
         f"💰 الرصيد الحالي: {account.get('balance')} {account.get('currency', '')}",
         f"📈 الربح/الخسارة العائمة: {account.get('unrealizedPL')}",
         f"📂 الصفقات المفتوحة: {len(trades)}",
@@ -636,29 +674,31 @@ def _format_paper_status(settings: Settings) -> str:
 
 async def cmd_paper_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings) or not msg_target:
         return
     report = await asyncio.to_thread(_format_paper_status, settings)
-    await update.message.reply_text(report)
+    await msg_target.reply_text(report)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """يعرض حالة البوت والإعدادات الحالية وحالة الحساب التجريبي."""
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings) or not msg_target:
         return
     symbols = watchlist_store.get_all()
     channel_status = (
         f"مربوطة ({settings.telegram_channel_id})"
         if getattr(settings, "telegram_channel_id", "").strip()
-        else "يرسل للمحادثة الحالية (لم يتم تحديد TELEGRAM_CHANNEL_ID)"
+        else "يرسل للمحادثة/القناة الافتراضية"
     )
     news_status = "مفعل ✅" if getattr(settings, "enable_news_filter", True) else "معطل ❌"
     no_sig_status = "مفعل ✅" if getattr(settings, "notify_no_signals", True) else "معطل ❌"
     conf_pct = int(round(settings.min_signal_confidence * 100))
 
     lines = [
-        "📊 **تقرير حالة البوت والإعدادات:**",
+        "📊 تقرير حالة البوت والإعدادات:",
         "----------------------------------",
         f"⏱️ دورة الفحص التلقائي: كل {settings.auto_scan_interval_seconds // 60} دقيقة ({settings.auto_scan_interval_seconds // 3600} ساعة)",
         f"🎯 الحد الأدنى لدقة التوصية: {conf_pct}%",
@@ -672,26 +712,31 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     ]
     paper_text = await asyncio.to_thread(_format_paper_status, settings)
     lines.append(paper_text)
-    await update.message.reply_text("\n".join(lines))
+    lines.append("----------------------------------")
+    lines.append(DEVELOPER_CREDIT)
+    await msg_target.reply_text("\n".join(lines), reply_markup=_build_main_reply_keyboard())
 
 
 async def cmd_channel_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """يرسل رسالة اختبارية للقناة للتأكد من صلاحيات البوت."""
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings) or not msg_target:
         return
     test_msg = (
-        "✅ **رسالة اختبار من بوت توصيات الفوركس**\n"
-        "تم ربط البوت بالقناة بنجاح، وستصل التوصيات وتنبيهات الأخبار وحالة السوق هنا تلقائياً كل ساعة."
+        "✅ رسالة اختبار من بوت توصيات الفوركس\n"
+        "تم ربط البوت بالقناة بنجاح، وستصل التوصيات وتنبيهات الأخبار وحالة السوق هنا تلقائياً كل ساعة.\n"
+        "------------------------------\n"
+        f"{DEVELOPER_CREDIT}"
     )
     res = await asyncio.to_thread(dispatch_message, test_msg, settings)
     if res.get("telegram"):
-        await update.message.reply_text("✅ تم إرسال رسالة الاختبار إلى القناة بنجاح!")
+        await msg_target.reply_text("✅ تم إرسال رسالة الاختبار إلى القناة بنجاح!")
     else:
-        await update.message.reply_text(
+        await msg_target.reply_text(
             "❌ تعذر الإرسال إلى القناة. تأكد من:\n"
             "1. إضافة البوت كمشرف (Admin) في القناة مع صلاحية نشر الرسائل.\n"
-            "2. كتابة معرف القناة بشكل صحيح في `TELEGRAM_CHANNEL_ID` داخل ملف `.env`."
+            "2. كتابة معرف القناة بشكل صحيح في TELEGRAM_CHANNEL_ID داخل ملف .env."
         )
 
 
@@ -708,8 +753,8 @@ def _format_evolution_report(
 
     if candidate.passed:
         status_line = (
-            f"✅ النتيجة: **اجتاز معايير القبول بنجاح!**\n"
-            f"لتطبيق هذه الإعدادات أرسل الأمر: `/apply {candidate.proposal_id}`"
+            f"✅ النتيجة: اجتاز معايير القبول بنجاح!\n"
+            f"لتطبيق هذه الإعدادات أرسل الأمر: /apply {candidate.proposal_id}"
         )
     else:
         status_line = (
@@ -719,7 +764,7 @@ def _format_evolution_report(
 
     return "\n".join(
         [
-            "🧪 **تقرير تطوير واختبار الاستراتيجية (Backtest)**",
+            "🧪 تقرير تطوير واختبار الاستراتيجية (Backtest)",
             "----------------------------------",
             f"🧠 الاستراتيجية: {evolver.STRATEGY_DISPLAY_LABELS.get(strategy_name, strategy_name)}",
             f"📌 الزوج: {display_pair(symbol)} ({timeframe.upper()})",
@@ -735,7 +780,8 @@ def _format_evolution_report(
             status_line,
             "----------------------------------",
             f"💡 التعديلات المختبرة: {changes_text}",
-            f"🆔 رقم المقترح: `{candidate.proposal_id}`",
+            f"🆔 رقم المقترح: {candidate.proposal_id}",
+            f"{DEVELOPER_CREDIT}",
         ]
     )
 
@@ -750,7 +796,7 @@ def run_evolution(strategy_name: str, symbol: str, timeframe: str, settings: Set
 
     if not candidates:
         return (
-            f"🧪 **تقرير تطوير الاستراتيجية**\n----------------------------------\n"
+            f"🧪 تقرير تطوير الاستراتيجية\n----------------------------------\n"
             f"الاستراتيجية: {evolver.STRATEGY_DISPLAY_LABELS.get(strategy_name, strategy_name)}\n"
             f"الزوج: {display_pair(symbol)} ({timeframe.upper()})\n\n"
             "⚠️ لا توجد نتائج اختبار كافية — البيانات التاريخية غير كافية لهذا الزوج/الإطار الزمني."
@@ -762,10 +808,11 @@ def run_evolution(strategy_name: str, symbol: str, timeframe: str, settings: Set
 
 async def cmd_evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings) or not msg_target:
         return
 
-    args = context.args or []
+    args = getattr(context, "args", None) or []
     if len(args) < 2:
         buttons = []
         if InlineKeyboardMarkup and InlineKeyboardButton:
@@ -776,26 +823,26 @@ async def cmd_evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 [InlineKeyboardButton("💥 الاختراق السعري (GBPUSD 1H)", callback_data="evol:breakout:GBPUSD:1h")],
             ]
         markup = InlineKeyboardMarkup(buttons) if buttons else None
-        await update.message.reply_text(
-            "🧪 **تطوير واختبار الاستراتيجيات (Backtest):**\n"
+        await msg_target.reply_text(
+            "🧪 تطوير واختبار الاستراتيجيات (Backtest):\n"
             "اضغط على أحد الاختبارات الجاهزة بالأسفل، أو استخدم الصيغة:\n"
-            "`/evolve <الاستراتيجية> <الزوج> [الإطار_الزمني]`\n\n"
-            f"الاستراتيجيات المتاحة: `{', '.join(sorted(evolver.PARAM_CLASSES))}`\n"
-            "مثال: `/evolve trend_pullback EURUSD 1h`",
+            "/evolve <الاستراتيجية> <الزوج> [الإطار_الزمني]\n\n"
+            f"الاستراتيجيات المتاحة: {', '.join(sorted(evolver.PARAM_CLASSES))}\n"
+            "مثال: /evolve trend_pullback EURUSD 1h",
             reply_markup=markup,
         )
         return
 
     strategy_name = args[0].lower()
     if strategy_name not in evolver.PARAM_CLASSES:
-        await update.message.reply_text(
+        await msg_target.reply_text(
             f"⚠️ استراتيجية غير معروفة '{args[0]}'. الخيارات المتاحة: {', '.join(sorted(evolver.PARAM_CLASSES))}"
         )
         return
 
     symbol = _resolve_input_symbol(args[1])
     if symbol is None:
-        await update.message.reply_text(f"⚠️ الرمز '{args[1]}' غير صالح.")
+        await msg_target.reply_text(f"⚠️ الرمز '{args[1]}' غير صالح.")
         return
 
     timeframe = args[2].lower() if len(args) > 2 else settings.telegram_primary_timeframe
@@ -805,63 +852,67 @@ async def cmd_evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for values in grid.values():
         combo_count *= len(values)
 
-    await update.message.reply_text(
-        f"🧪 جاري اختبار وتطوير استراتيجية **{evolver.STRATEGY_DISPLAY_LABELS.get(strategy_name, strategy_name)}** "
-        f"على زوج **{display_pair(symbol)}** ({timeframe.upper()}) عبر تجربة ({combo_count}) إعدادات مختلفة لآخر 6 أشهر...\n"
+    await msg_target.reply_text(
+        f"🧪 جاري اختبار وتطوير استراتيجية {evolver.STRATEGY_DISPLAY_LABELS.get(strategy_name, strategy_name)} "
+        f"على زوج {display_pair(symbol)} ({timeframe.upper()}) عبر تجربة ({combo_count}) إعدادات مختلفة لآخر 6 أشهر...\n"
         "⏳ قد يستغرق هذا الفحص دقيقة إلى دقيقتين..."
     )
 
     report = await asyncio.to_thread(run_evolution, strategy_name, symbol, timeframe, settings)
-    await update.message.reply_text(report)
+    await msg_target.reply_text(report)
 
 
 async def cmd_apply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings) or not msg_target:
         return
 
-    args = context.args or []
+    args = getattr(context, "args", None) or []
     if not args:
-        await update.message.reply_text("ℹ️ طريقة الاستخدام: `/apply <رقم_المقترح>` (يؤخذ من تقرير `/evolve`).")
+        await msg_target.reply_text("ℹ️ طريقة الاستخدام: /apply <رقم_المقترح> (يؤخذ من تقرير /evolve).")
         return
 
     proposal_id = args[0]
     proposal = evolver.load_proposal(proposal_id)
     if proposal is None:
-        await update.message.reply_text(f"⚠️ لم يتم العثور على مقترح بالرقم `{proposal_id}`.")
+        await msg_target.reply_text(f"⚠️ لم يتم العثور على مقترح بالرقم {proposal_id}.")
         return
 
     applied = await asyncio.to_thread(evolver.apply_proposal, proposal_id)
     if applied:
-        await update.message.reply_text(
-            f"✅ تم تطبيق المقترح `{proposal_id}` بنجاح على استراتيجية "
-            f"**{evolver.STRATEGY_DISPLAY_LABELS.get(proposal['strategy_name'], proposal['strategy_name'])}**.\n"
+        await msg_target.reply_text(
+            f"✅ تم تطبيق المقترح {proposal_id} بنجاح على استراتيجية "
+            f"{evolver.STRATEGY_DISPLAY_LABELS.get(proposal['strategy_name'], proposal['strategy_name'])}.\n"
             "ستعمل التوصيات القادمة بالإعدادات الجديدة تلقائياً، وتم حفظ نسخة احتياطية من الإعدادات السابقة."
         )
     else:
-        await update.message.reply_text(
-            f"❌ تعذر تطبيق المقترح `{proposal_id}` لأنه لم يجتز معايير القبول والأمان."
+        await msg_target.reply_text(
+            f"❌ تعذر تطبيق المقترح {proposal_id} لأنه لم يجتز معايير القبول والأمان."
         )
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """يعالج جميع ضغطات الأزرار التفاعلية (Inline Buttons) بسرعة وسهولة."""
     settings = get_settings()
-    if not _is_authorized(update, settings):
-        return
     query = getattr(update, "callback_query", None)
     if query is None or not query.data:
         return
 
+    if not _is_authorized(update, settings):
+        await query.answer("⚠️ غير مصرح لك باستخدام هذه اللوحة.", show_alert=True)
+        return
+
     await query.answer()
     data = query.data
+    msg_target = query.message
 
     if data.startswith("scan:"):
         symbol = data.split(":", 1)[1]
-        await query.message.reply_text(f"⏳ جاري فحص **{display_pair(symbol)}**...")
+        await msg_target.reply_text(f"⏳ جاري فحص {display_pair(symbol)}...")
         report = await asyncio.to_thread(run_on_demand_scan, symbol, settings)
         has_signal = "🎯 التوصية: دخول صفقة" in report
-        await query.message.reply_text(
+        await msg_target.reply_text(
             report, reply_markup=_build_report_action_keyboard(symbol, has_signal)
         )
 
@@ -879,53 +930,53 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             signal = generate_signal(regime_result, df, settings)
             if signal:
                 await asyncio.to_thread(send_alert, signal, settings)
-                await query.message.reply_text(f"✅ تم إرسال توصية **{display_pair(symbol)}** إلى القناة بنجاح!")
+                await msg_target.reply_text(f"✅ تم إرسال توصية {display_pair(symbol)} إلى القناة بنجاح!")
                 return
-        await query.message.reply_text("⚠️ لم تعد إشارة الدخول فعالة حالياً لإرسالها.")
+        await msg_target.reply_text("⚠️ لم تعد إشارة الدخول فعالة حالياً لإرسالها.")
 
     elif data.startswith("add:"):
         sym = data.split(":", 1)[1]
         symbol, was_new = watchlist_store.add(sym)
         status_txt = f"✅ تمت إضافة {display_pair(symbol)}" if was_new else f"ℹ️ {display_pair(symbol)} مضاف مسبقاً"
-        await query.message.reply_text(status_txt, reply_markup=_build_add_symbols_inline_keyboard())
+        await msg_target.reply_text(status_txt, reply_markup=_build_add_symbols_inline_keyboard())
 
     elif data.startswith("rem:"):
         sym = data.split(":", 1)[1]
         symbol, was_removed = watchlist_store.remove(sym)
         status_txt = f"🗑️ تم حذف {display_pair(symbol)} من القائمة." if was_removed else "ℹ️ الزوج غير موجود."
-        await query.message.reply_text(status_txt, reply_markup=_build_watchlist_inline_keyboard())
+        await msg_target.reply_text(status_txt, reply_markup=_build_watchlist_inline_keyboard())
 
     elif data.startswith("evol:"):
         parts = data.split(":")
         if len(parts) == 4:
             _, strat, sym, tf = parts
-            await query.message.reply_text(
-                f"🧪 جاري تشغيل اختبار **{strat}** على **{display_pair(sym)}** ({tf.upper()})... انتظر قليلاً."
+            await msg_target.reply_text(
+                f"🧪 جاري تشغيل اختبار {strat} على {display_pair(sym)} ({tf.upper()})... انتظر قليلاً."
             )
             report = await asyncio.to_thread(run_evolution, strat, sym, tf, settings)
-            await query.message.reply_text(report)
+            await msg_target.reply_text(report)
 
     elif data == "action:open_scan_menu":
-        await query.message.reply_text(
-            "🔍 **اختر الزوج الذي تريد فحصه بضغطة زر:**",
+        await msg_target.reply_text(
+            "🔍 اختر الزوج الذي تريد فحصه بضغطة زر:",
             reply_markup=_build_quick_scan_inline_keyboard(),
         )
 
     elif data == "action:scan_all":
-        await query.message.reply_text("🚀 جاري فحص جميع الأزواج في قائمة المراقبة...")
+        await msg_target.reply_text("🚀 جاري فحص جميع الأزواج في قائمة المراقبة...")
         report = await asyncio.to_thread(run_full_watchlist_scan, settings)
-        await query.message.reply_text(report, reply_markup=_build_quick_scan_inline_keyboard())
+        await msg_target.reply_text(report, reply_markup=_build_quick_scan_inline_keyboard())
 
     elif data == "action:watchlist":
         symbols = watchlist_store.get_all()
-        await query.message.reply_text(
-            f"📋 **قائمة المراقبة الحالية ({len(symbols)} أزواج):**",
+        await msg_target.reply_text(
+            f"📋 قائمة المراقبة الحالية ({len(symbols)} أزواج):",
             reply_markup=_build_watchlist_inline_keyboard(),
         )
 
     elif data == "action:add_menu":
-        await query.message.reply_text(
-            "➕ **اضغط على أي زوج لإضافته إلى قائمة الفحص الدوري:**",
+        await msg_target.reply_text(
+            "➕ اضغط على أي زوج لإضافته إلى قائمة الفحص الدوري:",
             reply_markup=_build_add_symbols_inline_keyboard(),
         )
 
@@ -934,32 +985,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     settings = get_settings()
     if not update.message or not update.message.text:
         return
+    if not _is_authorized(update, settings):
+        return
+
     text = update.message.text.strip()
 
-    # معالجة ضغطات الأزرار السفلية الثابتة
-    if text == BTN_QUICK_SCAN:
+    # مطابقة مرنة للأزرار السفلية لضمان الاستجابة في جميع أجهزة الموبايل
+    if text == BTN_QUICK_SCAN or "فحص سريع للأزواج" in text:
+        context.args = []
         await cmd_scan(update, context)
         return
-    if text == BTN_SCAN_ALL:
+    if text == BTN_SCAN_ALL or "فحص شامل للسوق" in text:
         await cmd_scan_all(update, context)
         return
-    if text == BTN_WATCHLIST:
+    if text == BTN_WATCHLIST or "قائمة المراقبة" in text:
         await cmd_watchlist(update, context)
         return
-    if text == BTN_GOLD:
+    if text == BTN_GOLD or "فحص الذهب" in text:
         await _handle_scan_request(update, settings, "XAUUSD")
         return
-    if text == BTN_BTC:
+    if text == BTN_BTC or "فحص البيتكوين" in text:
         await _handle_scan_request(update, settings, "BTCUSD")
         return
-    if text == BTN_BOT_STATUS:
+    if text == BTN_BOT_STATUS or "حالة البوت" in text:
         await cmd_status(update, context)
         return
-    if text == BTN_EVOLVE_MENU:
+    if text == BTN_EVOLVE_MENU or "تطوير الاستراتيجيات" in text:
         context.args = []
         await cmd_evolve(update, context)
         return
-    if text == BTN_HELP:
+    if text == BTN_HELP or "دليل الأوامر" in text:
         await cmd_start(update, context)
         return
 
