@@ -502,18 +502,18 @@ class TestTelegramEvolveReport:
 
         candidate = self._fake_candidate(passed=True)
         report = _format_evolution_report("trend_pullback", "EURUSD", "1h", candidate, tested_count=9)
-        assert "PASSED" in report
+        assert "اجتاز معايير القبول بنجاح" in report
         assert "/apply abc123" in report
-        assert "Win Rate: 64.2%" in report
-        assert "Sharpe Ratio: 1.71" in report
-        assert "Approved & Updated" not in report  # never claim it was applied — apply is a separate step
+        assert "نسبة النجاح (Win Rate): 64.2%" in report
+        assert "نسبة شارب (Sharpe Ratio): 1.71" in report
+        assert "تم التطبيق" not in report  # applying is a separate explicit command
 
     def test_failed_report_does_not_offer_apply(self, tmp_path):
         from src.telegram_bot import _format_evolution_report
 
         candidate = self._fake_candidate(passed=False)
         report = _format_evolution_report("trend_pullback", "EURUSD", "1h", candidate, tested_count=9)
-        assert "Did not pass" in report
+        assert "لم يجتز معايير الأمان الصارمة" in report
         assert "/apply" not in report
 
     def test_run_evolution_no_candidates_reports_insufficient_data(self, monkeypatch, settings):
@@ -522,7 +522,8 @@ class TestTelegramEvolveReport:
 
         monkeypatch.setattr(se, "evolve_strategy", lambda *a, **k: [])
         report = run_evolution("trend_pullback", "EURUSD", "1h", settings)
-        assert "insufficient historical data" in report.lower() or "No backtest results" in report
+        assert "لا توجد نتائج اختبار كافية" in report
+        assert "البيانات التاريخية غير كافية" in report
 
     def test_run_evolution_uses_best_sharpe_candidate(self, monkeypatch, settings):
         import strategy_evolver as se

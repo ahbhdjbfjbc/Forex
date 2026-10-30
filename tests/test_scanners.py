@@ -331,15 +331,15 @@ class TestNotifierFormatting:
         assert signal is not None
 
         message = format_message(signal)
-        assert "TRADE SIGNAL TRIGGERED" in message
-        assert "Pair: EUR/USD" in message
-        assert "Direction: BUY" in message
-        assert "Entry:" in message
-        assert "Stop Loss:" in message
-        assert "Take Profit 1:" in message
-        assert "Take Profit 2:" in message
-        assert "Recommended Lot" in message
-        assert "Time:" in message
+        assert "توصية تداول احترافية جديدة" in message
+        assert "EUR/USD" in message
+        assert "شراء (BUY)" in message
+        assert "سعر الدخول:" in message
+        assert "وقف الخسارة:" in message
+        assert "الهدف الأول:" in message
+        assert "الهدف الثاني:" in message
+        assert "حجم العقد المقترح:" in message
+        assert "الوقت:" in message
 
 
 # ---------------------------------------------------------------------------
@@ -507,12 +507,12 @@ class TestInstrumentAwareSignals:
 class TestOnDemandScan:
     def test_invalid_input_returns_usage(self, settings):
         report = run_on_demand_scan("not a real ticker !!!", settings)
-        assert "Send a pair or ticker" in report
+        assert "الأوامر المتاحة" in report
 
     def test_no_data_available(self, monkeypatch, settings):
         monkeypatch.setattr("src.telegram_bot.scan_regime_with_data", lambda *a, **k: None)
         report = run_on_demand_scan("EURUSD", settings)
-        assert "Couldn't fetch market data" in report
+        assert "تعذر جلب بيانات السوق" in report
         assert "EUR/USD" in report
 
     def test_found_signal_report(self, monkeypatch, settings):
@@ -524,10 +524,10 @@ class TestOnDemandScan:
             "src.telegram_bot.scan_regime_with_data", lambda *a, **k: (result, df)
         )
         report = run_on_demand_scan("EURUSD", settings)
-        assert "SCAN REPORT: EUR/USD" in report
-        assert "TAKE BUY TRADE" in report
-        assert "Trend Retracement" in report
-        assert "Entry:" in report and "Stop Loss:" in report
+        assert "تقرير الفحص الفوري: EUR/USD" in report
+        assert "دخول صفقة شراء" in report
+        assert "الاستراتيجية المطابقة:" in report
+        assert "سعر الدخول:" in report and "وقف الخسارة:" in report
 
     def test_no_trade_report(self, monkeypatch, settings):
         df = md.make_low_liquidity_chop()
@@ -537,9 +537,9 @@ class TestOnDemandScan:
             "src.telegram_bot.scan_regime_with_data", lambda *a, **k: (result, df)
         )
         report = run_on_demand_scan("EURUSD", settings)
-        assert "DO NOT TRADE" in report
-        assert "Strategy Match: None" in report
-        assert "consolidation with low volume" in report
+        assert "عدم التداول حالياً" in report
+        assert "الاستراتيجية المطابقة: لا يوجد" in report
+        assert "السبب الفني:" in report
 
     def test_scan_auto_adds_symbol_to_watchlist(self, monkeypatch, tmp_path, settings):
         df = md.make_low_liquidity_chop()
