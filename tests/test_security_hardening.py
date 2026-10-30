@@ -146,6 +146,53 @@ def test_unauthorized_start_explains_why_the_panel_is_not_available(monkeypatch)
     assert "لا تملك صلاحية" in replies[0]
 
 
+@pytest.mark.parametrize(
+    ("telegram_delivered", "expected_text"),
+    [
+        (True, "تم إرسال توصية"),
+        (False, "تعذر إرسال التوصية"),
+    ],
+)
+def test_publish_callback_reports_actual_telegram_delivery(
+    monkeypatch, telegram_delivered, expected_text
+):
+    import asyncio
+    import src.telegram_bot as bot
+
+    replies = []
+
+    class MessageStub:
+        async def reply_text(self, text, **kwargs):
+            replies.append(text)
+
+    class QueryStub:
+        data = "pub:EURUSD"
+        message = MessageStub()
+
+        async def answer(self, *args, **kwargs):
+            pass
+
+    update = type("UpdateStub", (), {
+        "effective_chat": type("ChatStub", (), {"id": 456, "type": "private"})(),
+        "effective_user": type("UserStub", (), {"id": 456})(),
+        "callback_query": QueryStub(),
+    })()
+    settings = Settings(_env_file=None, telegram_allowed_user_id="456")
+    monkeypatch.setattr(bot, "get_settings", lambda: settings)
+    monkeypatch.setattr(bot, "scan_regime_with_data", lambda *args, **kwargs: (object(), object()))
+    monkeypatch.setattr(bot, "generate_signal", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        bot,
+        "send_alert",
+        lambda *args, **kwargs: {"telegram": telegram_delivered, "discord": not telegram_delivered},
+    )
+
+    asyncio.run(bot.handle_callback_query(update, None))
+
+    assert len(replies) == 1
+    assert expected_text in replies[0]
+
+
 def test_private_chat_still_works_without_extra_user_setting():
     update = type("UpdateStub", (), {
         "effective_chat": type("ChatStub", (), {"id": 123, "type": "private"})(),

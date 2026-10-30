@@ -968,8 +968,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             regime_result, df = outcome
             signal = generate_signal(regime_result, df, settings)
             if signal:
-                await asyncio.to_thread(send_alert, signal, settings)
-                await msg_target.reply_text(f"✅ تم إرسال توصية {display_pair(symbol)} إلى القناة بنجاح!")
+                delivery = await asyncio.to_thread(send_alert, signal, settings)
+                if delivery.get("telegram"):
+                    await msg_target.reply_text(
+                        f"✅ تم إرسال توصية {display_pair(symbol)} إلى القناة بنجاح!"
+                    )
+                else:
+                    await msg_target.reply_text(
+                        "❌ تعذر إرسال التوصية إلى قناة Telegram. تحقق من "
+                        "TELEGRAM_CHANNEL_ID وصلاحية البوت في القناة."
+                    )
                 return
         await msg_target.reply_text("⚠️ لم تعد إشارة الدخول فعالة حالياً لإرسالها.")
 
