@@ -27,6 +27,7 @@ the public entry points each of those modules expose.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import logging
 import threading
 
@@ -58,6 +59,33 @@ logger = logging.getLogger(__name__)
 _state_lock = threading.Lock()
 _is_paused_for_news: bool = False
 _scan_deferred_by_news: bool = False
+_auto_signal_lock = threading.Lock()
+_recent_auto_signal_keys: OrderedDict[tuple[str, ...], None] = OrderedDict()
+_MAX_RECENT_AUTO_SIGNALS = 4096
+
+
+def _claim_auto_signal(signal, frame) -> tuple[str, ...] | None:
+    """Claim one signal per market candle so periodic scans do not resend it."""
+    try:
+        bar_identity = str(frame.index[-1])
+    except (AttributeError, IndexError, TypeError):
+        timestamp = getattr(signal, "timestamp", None)
+        bar_identity = timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
+
+    key = (
+        str(getattr(signal, "symbol", "")).upper(),
+        str(getattr(signal, "timeframe", "")).lower(),
+        str(getattr(getattr(signal, "direction", ""), "value", getattr(signal, "direction", ""))),
+        str(getattr(getattr(signal, "strategy", ""), "value", getattr(signal, "strategy", ""))),
+        bar_identity,
+    )
+    with _auto_signal_lock:
+        if key in _recent_auto_signal_keys:
+            return None
+        _recent_auto_signal_keys[key] = None
+        while len(_recent_auto_signal_keys) > _MAX_RECENT_AUTO_SIGNALS:
+            _recent_auto_signal_keys.popitem(last=False)
+    return key
 
 
 def monitor_news_state(settings: Settings | None = None) -> bool:
@@ -131,6 +159,12 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
                 "suppressing low-confidence %s signal for %s/%s (confidence=%.2f < %.2f)",
                 signal.direction.value, regime_result.symbol, regime_result.timeframe,
                 regime_result.confidence, settings.min_signal_confidence,
+            )
+            continue
+        if _claim_auto_signal(signal, df) is None:
+            logger.info(
+                "suppressing duplicate auto-scan signal for %s/%s on the same market candle",
+                signal.symbol, signal.timeframe,
             )
             continue
         send_alert(signal, settings)

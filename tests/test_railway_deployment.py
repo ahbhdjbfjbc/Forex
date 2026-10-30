@@ -119,17 +119,33 @@ def test_telegram_polling_preserves_updates_received_during_restart(monkeypatch)
 def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
     import main as app
 
-    signal = object()
+    signal = SimpleNamespace(
+        symbol="EURUSD", timeframe="1h", direction=SimpleNamespace(value="BUY"),
+        strategy=SimpleNamespace(value="TREND_PULLBACK"), timestamp=None,
+    )
     regime = SimpleNamespace(confidence=0.8, symbol="EURUSD", timeframe="1h")
     settings = Settings(_env_file=None, min_signal_confidence=0.6)
+    frame = SimpleNamespace(index=["2026-10-30T16:00:00Z"])
     alerts = []
+    paper_trades = []
+
+    with app._auto_signal_lock:
+        app._recent_auto_signal_keys.clear()
 
     monkeypatch.setattr(app.watchlist_store, "get_all", lambda: ["EURUSD"])
-    monkeypatch.setattr(app, "scan_symbols_with_data", lambda _symbols, _settings: [(regime, object())])
+    monkeypatch.setattr(app, "monitor_news_state", lambda _settings: False)
+    monkeypatch.setattr(app, "scan_symbols_with_data", lambda _symbols, _settings: [(regime, frame)])
     monkeypatch.setattr(app, "generate_signal", lambda *_args, **_kwargs: signal)
     monkeypatch.setattr(app, "send_alert", lambda delivered, _settings: alerts.append(delivered) or {"telegram": True})
-    monkeypatch.setattr(app, "execute_paper_trade", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(app, "execute_paper_trade", lambda *args, **_kwargs: paper_trades.append(args))
 
     app.run_scan_cycle(settings)
+    app.run_scan_cycle(settings)
+    assert len(alerts) == 1
+    assert len(paper_trades) == 1
 
-    assert alerts == [signal]
+    # A newly closed candle is a new opportunity and must still be dispatched.
+    frame.index = ["2026-10-30T17:00:00Z"]
+    app.run_scan_cycle(settings)
+    assert alerts == [signal, signal]
+    assert len(paper_trades) == 2
