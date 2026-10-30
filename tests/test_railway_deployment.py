@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -67,6 +68,52 @@ def test_first_scan_is_queued_in_background_before_server_start(monkeypatch) -> 
         func is app.run_scan_cycle and trigger == "date"
         for func, trigger, _kwargs in scheduler.jobs
     )
+
+
+def test_telegram_polling_preserves_updates_received_during_restart(monkeypatch) -> None:
+    import main as app
+
+    polling_calls = []
+
+    class FakeUpdater:
+        async def start_polling(self, **kwargs):
+            polling_calls.append(kwargs)
+
+        async def stop(self):
+            pass
+
+    class FakeTelegramApplication:
+        updater = FakeUpdater()
+
+        async def initialize(self):
+            pass
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+        async def shutdown(self):
+            pass
+
+    class FakeServer:
+        def __init__(self, _config):
+            pass
+
+        async def serve(self):
+            pass
+
+    monkeypatch.setattr(app, "build_telegram_application", lambda _settings: FakeTelegramApplication())
+    monkeypatch.setattr(app.uvicorn, "Config", lambda *args, **kwargs: object())
+    monkeypatch.setattr(app.uvicorn, "Server", FakeServer)
+
+    asyncio.run(app._run_webhook_and_telegram(Settings(_env_file=None, telegram_bot_token="test-token")))
+
+    assert polling_calls == [{
+        "allowed_updates": ["message", "callback_query"],
+        "drop_pending_updates": False,
+    }]
 
 
 def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:

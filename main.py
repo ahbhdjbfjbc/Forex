@@ -189,7 +189,9 @@ async def _run_webhook_and_telegram(settings: Settings) -> None:
         await telegram_app.start()
         await telegram_app.updater.start_polling(
             allowed_updates=["message", "callback_query"],
-            drop_pending_updates=True,
+            # Keep user commands sent while the service was restarting. Dropping
+            # the queue made /start and other commands appear to be ignored.
+            drop_pending_updates=False,
         )
         logger.info("Telegram on-demand bot polling started")
     else:
