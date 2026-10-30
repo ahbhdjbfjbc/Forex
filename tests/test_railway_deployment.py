@@ -149,3 +149,23 @@ def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
     app.run_scan_cycle(settings)
     assert alerts == [signal, signal]
     assert len(paper_trades) == 2
+
+
+def test_no_signal_alerts_are_opt_in_to_avoid_repetitive_notifications(monkeypatch) -> None:
+    import main as app
+
+    settings = Settings(_env_file=None)
+    assert settings.notify_no_signals is False
+    regime_data = [(object(), object())]
+    sent = []
+    monkeypatch.setattr(app.watchlist_store, "get_all", lambda: ["EURUSD"])
+    monkeypatch.setattr(app, "monitor_news_state", lambda _settings: False)
+    monkeypatch.setattr(app, "scan_symbols_with_data", lambda *_args: regime_data)
+    monkeypatch.setattr(app, "generate_signal", lambda *_args: None)
+    monkeypatch.setattr(app, "send_no_signal_alert", lambda *_args: sent.append(True))
+
+    app.run_scan_cycle(settings)
+    assert sent == []
+
+    app.run_scan_cycle(Settings(_env_file=None, notify_no_signals=True))
+    assert sent == [True]

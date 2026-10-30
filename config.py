@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     min_signal_confidence: float = 0.72      # تم رفع الدقة المطلوبة للتوصيات
 
     # Alerts & News Filter Settings
-    notify_no_signals: bool = True           # إرسال تنبيه في حال التذبذب وعدم وجود توصيات جيدة
+    notify_no_signals: bool = False          # رسائل عدم وجود توصيات اختيارية لتجنب الإزعاج الدوري
     enable_news_filter: bool = True          # تفعيل فلتر التوقف وقت الأخبار القوية
     news_buffer_minutes: int = 30            # التوقف قبل وبعد الخبر بـ 30 دقيقة
 

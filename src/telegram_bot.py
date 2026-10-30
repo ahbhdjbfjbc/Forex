@@ -694,7 +694,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else "يرسل للمحادثة/القناة الافتراضية"
     )
     news_status = "مفعل ✅" if getattr(settings, "enable_news_filter", True) else "معطل ❌"
-    no_sig_status = "مفعل ✅" if getattr(settings, "notify_no_signals", True) else "معطل ❌"
+    no_sig_status = "مفعل ✅" if getattr(settings, "notify_no_signals", False) else "معطل ❌"
     conf_pct = int(round(settings.min_signal_confidence * 100))
 
     lines = [

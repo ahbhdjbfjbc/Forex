@@ -179,7 +179,7 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
     )
 
     # إرسال تنبيه في حال وجود تذبذب وعدم توفر توصيات جيدة خلال هذه الساعة
-    if signals_sent == 0 and len(regime_data) > 0 and getattr(settings, "notify_no_signals", True):
+    if signals_sent == 0 and len(regime_data) > 0 and getattr(settings, "notify_no_signals", False):
         logger.info("no high-confidence signals in this cycle — sending chop/no-signal alert")
         send_no_signal_alert(len(regime_data), settings)
 
