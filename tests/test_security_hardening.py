@@ -91,6 +91,61 @@ def test_group_chat_requires_and_enforces_explicit_user_allowlist():
     assert _is_authorized(update, denied) is False
 
 
+def test_basic_group_chat_also_requires_user_allowlist():
+    update = type("UpdateStub", (), {
+        "effective_chat": type("ChatStub", (), {"id": -12345, "type": "group"})(),
+        "effective_user": type("UserStub", (), {"id": 456})(),
+    })()
+    settings = Settings(_env_file=None, telegram_chat_id="-12345")
+    assert _is_authorized(update, settings) is False
+
+
+def test_private_control_panel_works_when_alerts_target_a_basic_group():
+    update = type("UpdateStub", (), {
+        "effective_chat": type("ChatStub", (), {"id": 456, "type": "private"})(),
+        "effective_user": type("UserStub", (), {"id": 456})(),
+    })()
+    settings = Settings(_env_file=None, telegram_chat_id="-12345")
+    assert _is_authorized(update, settings) is True
+
+
+def test_allowed_user_cannot_use_an_unconfigured_group():
+    update = type("UpdateStub", (), {
+        "effective_chat": type("ChatStub", (), {"id": -999, "type": "group"})(),
+        "effective_user": type("UserStub", (), {"id": 456})(),
+    })()
+    settings = Settings(
+        _env_file=None,
+        telegram_chat_id="-12345",
+        telegram_allowed_user_id="456",
+    )
+    assert _is_authorized(update, settings) is False
+
+
+def test_unauthorized_start_explains_why_the_panel_is_not_available(monkeypatch):
+    import asyncio
+    import src.telegram_bot as bot
+
+    replies = []
+
+    class MessageStub:
+        async def reply_text(self, text, **kwargs):
+            replies.append(text)
+
+    update = type("UpdateStub", (), {
+        "effective_chat": type("ChatStub", (), {"id": 456, "type": "private"})(),
+        "effective_user": type("UserStub", (), {"id": 456})(),
+        "message": MessageStub(),
+    })()
+    settings = Settings(_env_file=None, telegram_allowed_user_id="789")
+
+    monkeypatch.setattr(bot, "get_settings", lambda: settings)
+    asyncio.run(bot.cmd_start(update, None))
+
+    assert len(replies) == 1
+    assert "لا تملك صلاحية" in replies[0]
+
+
 def test_private_chat_still_works_without_extra_user_setting():
     update = type("UpdateStub", (), {
         "effective_chat": type("ChatStub", (), {"id": 123, "type": "private"})(),

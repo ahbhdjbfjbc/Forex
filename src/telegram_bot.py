@@ -462,26 +462,34 @@ def run_full_watchlist_scan(settings: Settings | None = None) -> str:
 
 
 def _is_authorized(update: Update, settings: Settings) -> bool:
-    """يتحقق من صلاحية المستخدم؛ يقبل المحادثة الخاصة لمالك البوت حتى لو تم وضع معرف القناة في الإعدادات."""
+    """Authorize private users, but require an explicit user allowlist in groups."""
     chat = update.effective_chat
     if chat is None:
         return False
 
     allowed_user_id = str(getattr(settings, "telegram_allowed_user_id", "") or "").strip()
     user = update.effective_user
-    if allowed_user_id:
-        return user is not None and str(user.id) == allowed_user_id
-
     configured_chat = str(settings.telegram_chat_id or "").strip()
     chat_type = getattr(chat, "type", "private")
+    user_is_allowed = bool(
+        allowed_user_id and user is not None and str(user.id) == allowed_user_id
+    )
 
-    # إذا لم يتم ضبط معرف محادثة أو وضع المستخدم معرف القناة (@ أو -100) مكان المحادثة الخاصة،
-    # نسمح بالتحكم عبر المحادثة الخاصة (Private) حتى تستجيب لوحة التحكم فوراً
-    if not configured_chat or configured_chat.startswith("@") or configured_chat.startswith("-100"):
-        return chat_type == "private"
-
-    if str(chat.id) == configured_chat:
+    if chat_type == "private":
+        if allowed_user_id and not user_is_allowed:
+            return False
+        # A numeric positive ID is a configured private chat. Channel/group IDs
+        # (negative) and @channel names must not block the owner's private UI.
+        if configured_chat.isdigit() and not user_is_allowed:
+            return str(chat.id) == configured_chat
         return True
+
+    if chat_type in {"group", "supergroup"}:
+        return bool(
+            configured_chat
+            and str(chat.id) == configured_chat
+            and user_is_allowed
+        )
 
     return False
 
@@ -530,9 +538,15 @@ async def _handle_scan_request(update: Update, settings: Settings, raw_text: str
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
-    if not _is_authorized(update, settings):
-        return
     msg_target = await _reply_target(update)
+    if not _is_authorized(update, settings):
+        logger.warning("denying /start from an unauthorized Telegram sender")
+        if msg_target:
+            await msg_target.reply_text(
+                "⛔ لا تملك صلاحية استخدام لوحة البوت. تحقق من "
+                "TELEGRAM_ALLOWED_USER_ID أو افتح محادثة البوت الخاصة المسموح بها."
+            )
+        return
     if msg_target:
         await msg_target.reply_text(
             f"✅ بوت توصيات الفوركس الاحترافي متصل ويعمل بنجاح!\n\n{_USAGE}",
