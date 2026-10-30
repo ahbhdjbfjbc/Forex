@@ -187,7 +187,10 @@ async def _run_webhook_and_telegram(settings: Settings) -> None:
         telegram_app = build_telegram_application(settings)
         await telegram_app.initialize()
         await telegram_app.start()
-        await telegram_app.updater.start_polling()
+        await telegram_app.updater.start_polling(
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=True,
+        )
         logger.info("Telegram on-demand bot polling started")
     else:
         logger.info("TELEGRAM_BOT_TOKEN not set — on-demand Telegram bot disabled")
