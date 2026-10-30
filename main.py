@@ -1,39 +1,28 @@
 """Orchestrator — entry point.
 
-Wires the pipeline: Scanner 1 (regime) -> Scanner 2 (strategy/signal) ->
-Notifier, run every `AUTO_SCAN_INTERVAL_SECONDS` (default 3 hours) via
-APScheduler over the dynamic watchlist (`src.watchlist_store` — seeded with
-defaults, grown by `/add` and by successful on-demand `/scan` requests),
-while also serving:
-  - the TradingView webhook bridge (FastAPI/uvicorn), for externally
-    triggered Pine Script alerts, and
-  - the on-demand Telegram bot (src/telegram_bot.py), for typing a ticker
-    and getting an immediate scan, or managing the watchlist.
-
-Both the webhook server and the Telegram bot are asyncio-based, so they run
-concurrently in a single event loop; APScheduler's BackgroundScheduler runs
-the periodic scan loop on its own thread independently of that loop.
-
-Only high-confidence, actively-triggered setups get pushed — anything with
-no active entry trigger (Scanner 2 already returns None for those) or below
-`MIN_SIGNAL_CONFIDENCE` is suppressed, so a 3-hour tick over a growing
-watchlist doesn't turn into spam. If `ENABLE_PAPER_TRADING=true`, each
-dispatched signal is also mirrored to an OANDA practice account
-(`src.paper_executor`) — opt-in, disabled by default.
-
-This module does no indicator/regime/strategy math itself — it only calls
-the public entry points each of those modules expose.
+Wires the pipeline: News Filter -> Scanner 1 (regime) -> Scanner 2 (strategy/signal) ->
+Notifier, run every `AUTO_SCAN_INTERVAL_SECONDS` (default 1 hour) via
+APScheduler over the dynamic watchlist (`src.watchlist_store`), while also
+monitoring high-impact economic news every minute so the bot pauses during
+news and immediately resumes and alerts the channel once the news window ends.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 
 import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from config import Settings, get_settings
-from src.notifier import send_alert
+from src.news_filter import check_news_status
+from src.notifier import (
+    send_alert,
+    send_news_pause_alert,
+    send_news_resume_alert,
+    send_no_signal_alert,
+)
 from src.paper_executor import execute_paper_trade
 from src.scanner_1_regime import scan_symbols_with_data
 from src.scanner_2_strategy import generate_signal
@@ -43,9 +32,54 @@ from src.watchlist_store import watchlist_store
 
 logger = logging.getLogger(__name__)
 
+_state_lock = threading.Lock()
+_is_paused_for_news: bool = False
+_scan_deferred_by_news: bool = False
+
+
+def monitor_news_state(settings: Settings | None = None) -> bool:
+    """يفحص حالة الأخبار كل دقيقة؛ يرسل تنبيه التوقف عند بدء الخبر،
+    ويرسل تنبيه العودة الفورية للعمل فور انتهاء الخبر مباشرة."""
+    global _is_paused_for_news, _scan_deferred_by_news
+    settings = settings or get_settings()
+
+    news_status = check_news_status(settings)
+    should_run_deferred_scan = False
+
+    with _state_lock:
+        if news_status.is_paused:
+            if not _is_paused_for_news:
+                _is_paused_for_news = True
+                logger.warning("pausing bot due to high-impact news: %s", news_status.details)
+                send_news_pause_alert(news_status.details, settings)
+            return True
+        else:
+            if _is_paused_for_news:
+                _is_paused_for_news = False
+                logger.info("high-impact news window ended — resuming bot operations immediately")
+                send_news_resume_alert(settings)
+                if _scan_deferred_by_news:
+                    _scan_deferred_by_news = False
+                    should_run_deferred_scan = True
+
+    if should_run_deferred_scan:
+        logger.info("running deferred scan cycle immediately after news clearance")
+        run_scan_cycle(settings)
+
+    return False
+
 
 def run_scan_cycle(settings: Settings | None = None) -> None:
+    global _scan_deferred_by_news
     settings = settings or get_settings()
+
+    # 1. التحقق من فلتر الأخبار قبل بدء الفحص
+    if monitor_news_state(settings):
+        with _state_lock:
+            _scan_deferred_by_news = True
+        logger.info("auto-scan cycle skipped because high-impact news is active")
+        return
+
     symbols = watchlist_store.get_all()
     logger.info(
         "starting auto-scan cycle: %d watchlist symbols x %d timeframes",
@@ -79,14 +113,30 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
         signals_sent, suppressed_low_confidence,
     )
 
+    # 2. إرسال تنبيه للقناة في حال وجود تذبذب وعدم توفر أي توصية عالية الدقة خلال هذه الساعة
+    if signals_sent == 0 and len(regime_data) > 0 and getattr(settings, "notify_no_signals", True):
+        logger.info("no high-confidence signals found in this cycle — sending market chop/no-signal alert")
+        send_no_signal_alert(len(regime_data), settings)
+
 
 def build_scheduler(settings: Settings) -> BackgroundScheduler:
     scheduler = BackgroundScheduler(timezone="UTC")
+    # مهمة الفحص الدوري كل ساعة (3600 ثانية)
     scheduler.add_job(
         run_scan_cycle,
         "interval",
         seconds=settings.auto_scan_interval_seconds,
         id="forex_auto_scan_cycle",
+        kwargs={"settings": settings},
+        max_instances=1,
+        coalesce=True,
+    )
+    # مهمة مراقبة الأخبار كل 60 ثانية لضمان التوقف الفوري والعودة الفورية بعد انتهاء الخبر
+    scheduler.add_job(
+        monitor_news_state,
+        "interval",
+        seconds=60,
+        id="forex_news_monitor_cycle",
         kwargs={"settings": settings},
         max_instances=1,
         coalesce=True,
