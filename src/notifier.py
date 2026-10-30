@@ -213,13 +213,14 @@ def send_no_signal_alert(
     scanned_pairs_count: int = 0, settings: Settings | None = None
 ) -> dict[str, bool]:
     """يرسل تنبيهاً للقناة في حال وجود تذبذب أو عدم توفر توصيات عالية الدقة."""
+    settings = settings or get_settings()
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "⚠️ تنبيه الفحص الدوري للسوق ⚠️",
         "📊 حالة السوق: تذبذب / لا توجد فرص مكتملة الشروط حالياً.",
         f"🔍 تم فحص ({scanned_pairs_count}) من الأزواج والأطر الزمنية بدقة عالية.",
         "🛡️ النتيجة: لم يتم إصدار توصية في هذه الساعة حفاظاً على رأس المال من تذبذب السوق.",
-        "⏳ الفحص القادم سيتم تلقائياً بعد ساعة واحدة.",
+        f"⏳ الفحص القادم سيتم تلقائياً وفق الجدول (كل {settings.auto_scan_interval_label_ar}).",
         "------------------------------",
         f"🕒 الوقت: {now_str} بتوقيت UTC",
     ]

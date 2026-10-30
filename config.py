@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     # 1-hour auto-scan scheduler (main.py): scans src.watchlist_store's
     # dynamic symbol list and only alerts on high-confidence, actively
     # triggered setups — see min_signal_confidence below.
-    auto_scan_interval_seconds: int = 3_600  # 1 hour (تم التعديل من 3 ساعات إلى ساعة واحدة)
+    auto_scan_interval_seconds: int = 3_600  # 1 hour
     min_signal_confidence: float = 0.72      # تم رفع الدقة المطلوبة للتوصيات
 
     # Alerts & News Filter Settings
@@ -131,6 +131,31 @@ class Settings(BaseSettings):
     @property
     def service_port(self) -> int:
         return self.port if self.port is not None else self.webhook_port
+
+    @property
+    def auto_scan_interval_label_ar(self) -> str:
+        """Return the configured automatic-scan interval in a concise Arabic label."""
+        seconds = self.auto_scan_interval_seconds
+        if seconds % 3600 == 0:
+            count = seconds // 3600
+            if count == 1:
+                return "ساعة واحدة"
+            if count == 2:
+                return "ساعتين"
+            return f"{count} ساعات" if 3 <= count <= 10 else f"{count} ساعة"
+        if seconds % 60 == 0:
+            count = seconds // 60
+            if count == 1:
+                return "دقيقة واحدة"
+            if count == 2:
+                return "دقيقتين"
+            return f"{count} دقائق" if 3 <= count <= 10 else f"{count} دقيقة"
+        count = seconds
+        if count == 1:
+            return "ثانية واحدة"
+        if count == 2:
+            return "ثانيتين"
+        return f"{count} ثوانٍ" if 3 <= count <= 10 else f"{count} ثانية"
 
     @property
     def target_channel_id(self) -> str:

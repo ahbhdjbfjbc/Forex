@@ -154,7 +154,7 @@ _USAGE = (
     "• /menu — فتح لوحة التحكم والأزرار\n"
     "• /scan — فتح قائمة الأزرار لفحص أي زوج بضغطة زر\n"
     "• /scan_all — فحص شامل لجميع الأزواج في القائمة الآن\n"
-    "• /watchlist — عرض وإدارة قائمة المراقبة التلقائية (كل ساعة)\n"
+    "• /watchlist — عرض وإدارة قائمة المراقبة التلقائية (حسب الفاصل المضبوط)\n"
     "• /add <الرمز> — إضافة زوج إلى قائمة الفحص التلقائي\n"
     "• /remove <الرمز> — حذف زوج من قائمة الفحص التلقائي\n"
     "• /status — عرض حالة البوت والإعدادات وفلتر الأخبار\n"
@@ -617,7 +617,6 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not _is_authorized(update, settings) or not msg_target:
         return
     symbols = watchlist_store.get_all()
-    interval_hours = max(1, settings.auto_scan_interval_seconds // 3600)
     if not symbols:
         await msg_target.reply_text(
             "⚠️ قائمة الفحص التلقائي فارغة حالياً. اضغط على الزر بالأسفل لإضافة الأزواج الشهيرة فوراً:",
@@ -625,7 +624,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
     lines = [
-        f"📋 قائمة المراقبة التلقائية ({len(symbols)} أزواج — تُفحص كل {interval_hours} ساعة):",
+        f"📋 قائمة المراقبة التلقائية ({len(symbols)} أزواج — تُفحص كل {settings.auto_scan_interval_label_ar}):",
         "اضغط على أي زوج لفحصه فوراً أو حذفه من القائمة:",
     ]
     await msg_target.reply_text(
@@ -655,7 +654,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     elif was_new:
         await msg_target.reply_text(
-            f"✅ تمت إضافة {display_pair(symbol)} إلى قائمة الفحص الدوري (كل ساعة).",
+            f"✅ تمت إضافة {display_pair(symbol)} إلى قائمة الفحص الدوري (كل {settings.auto_scan_interval_label_ar}).",
             reply_markup=_build_watchlist_inline_keyboard(),
         )
     else:
@@ -739,7 +738,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     lines = [
         "📊 تقرير حالة البوت والإعدادات:",
         "----------------------------------",
-        f"⏱️ دورة الفحص التلقائي: كل {settings.auto_scan_interval_seconds // 60} دقيقة ({settings.auto_scan_interval_seconds // 3600} ساعة)",
+        f"⏱️ دورة الفحص التلقائي: كل {settings.auto_scan_interval_label_ar}",
         f"🎯 الحد الأدنى لدقة التوصية: {conf_pct}%",
         f"📋 عدد الأزواج المراقبة: {len(symbols)} أزواج",
         f"🕒 الأطر الزمنية للفحص: {', '.join(settings.timeframe_list).upper()}",
@@ -764,7 +763,7 @@ async def cmd_channel_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     test_msg = (
         "✅ رسالة اختبار من بوت توصيات الفوركس\n"
-        "تم ربط البوت بالقناة بنجاح، وستصل التوصيات وتنبيهات الأخبار وحالة السوق هنا تلقائياً كل ساعة.\n"
+        f"تم ربط البوت بالقناة بنجاح، وستصل التوصيات وتنبيهات الأخبار وحالة السوق هنا تلقائياً كل {settings.auto_scan_interval_label_ar}.\n"
         "------------------------------\n"
         f"{DEVELOPER_CREDIT}"
     )

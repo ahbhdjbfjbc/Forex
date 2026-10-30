@@ -44,6 +44,15 @@ def test_env_example_scanner_values_match_runtime_defaults() -> None:
     assert values["NOTIFY_NO_SIGNALS"].lower() == str(defaults.notify_no_signals).lower()
 
 
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [(3600, "ساعة واحدة"), (1800, "30 دقيقة"), (90, "90 ثانية")],
+)
+def test_auto_scan_interval_has_truthful_arabic_label(seconds, expected) -> None:
+    settings = Settings(_env_file=None, auto_scan_interval_seconds=seconds)
+    assert settings.auto_scan_interval_label_ar == expected
+
+
 def test_configured_volume_path_is_used_for_runtime_data(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         storage,

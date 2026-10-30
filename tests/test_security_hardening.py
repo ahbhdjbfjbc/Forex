@@ -214,3 +214,19 @@ def test_discord_http_error_does_not_log_webhook_credential(monkeypatch, caplog)
         assert notifier.send_discord("hello", settings) is False
     assert webhook not in caplog.text
     assert "RequestError" in caplog.text
+
+
+def test_no_signal_notification_uses_configured_scan_interval(monkeypatch):
+    message = []
+    settings = Settings(_env_file=None, auto_scan_interval_seconds=1800)
+    monkeypatch.setattr(
+        notifier,
+        "dispatch_message",
+        lambda text, _settings: message.append(text) or {"telegram": True},
+    )
+
+    notifier.send_no_signal_alert(3, settings)
+
+    assert len(message) == 1
+    assert "كل 30 دقيقة" in message[0]
+    assert "بعد ساعة واحدة" not in message[0]
