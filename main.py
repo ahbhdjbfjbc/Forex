@@ -1,7 +1,7 @@
 """Orchestrator — entry point.
 
 Wires the pipeline: Scanner 1 (regime) -> Scanner 2 (strategy/signal) ->
-Notifier, run every `AUTO_SCAN_INTERVAL_SECONDS` (default 3 hours) via
+Notifier, run every `AUTO_SCAN_INTERVAL_SECONDS` (default 1 hour) via
 APScheduler over the dynamic watchlist (`src.watchlist_store` — seeded with
 defaults, grown by `/add` and by successful on-demand `/scan` requests),
 while also serving:
@@ -16,7 +16,7 @@ the periodic scan loop on its own thread independently of that loop.
 
 Only high-confidence, actively-triggered setups get pushed — anything with
 no active entry trigger (Scanner 2 already returns None for those) or below
-`MIN_SIGNAL_CONFIDENCE` is suppressed, so a 3-hour tick over a growing
+`MIN_SIGNAL_CONFIDENCE` is suppressed, so a periodic tick over a growing
 watchlist doesn't turn into spam. If `ENABLE_PAPER_TRADING=true`, each
 dispatched signal is also mirrored to an OANDA practice account
 (`src.paper_executor`) — opt-in, disabled by default.

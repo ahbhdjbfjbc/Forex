@@ -12,7 +12,7 @@ Telegram: type "EURUSD" / "gold" / "/scan BTCUSD"  ->  telegram_bot.py  ->  Scan
                                                              |
                                                     auto-adds to watchlist_store
                                                              v
-Every 3h: watchlist_store's symbols  ->  Scanner 1 -> Scanner 2  ->  (high-confidence only)  ->  Notifier
+Every 1h: watchlist_store's symbols  ->  Scanner 1 -> Scanner 2  ->  (high-confidence only)  ->  Notifier
                                                                                                      |
                                                                                     ENABLE_PAPER_TRADING=true
                                                                                                      v
@@ -86,7 +86,7 @@ environment variables, persistent storage, and health-check settings.
   `cable`/`bitcoin`), or use `/scan <symbol>`, and it runs Scanner 1 ->
   Scanner 2 fresh and replies with a "SCAN REPORT" — either a full trade
   setup or a "DO NOT TRADE" with the reason. Every symbol you scan is
-  auto-added to the 3-hour auto-scan watchlist. Also handles `/watchlist`
+  auto-added to the hourly auto-scan watchlist. Also handles `/watchlist`
   (list what's being auto-scanned), `/add <symbol>`, `/remove <symbol>`.
   Only the chat configured as `TELEGRAM_CHAT_ID` is served. Private chats
   work without an extra user setting; if commands are used in a group, set
@@ -96,15 +96,15 @@ environment variables, persistent storage, and health-check settings.
   (including proxying gold/silver through `GC=F`/`SI=F` futures, since
   Yahoo has no retail XAUUSD ticker).
 
-- **`src/watchlist_store.py`** — the dynamic watchlist the 3-hour scheduler
+- **`src/watchlist_store.py`** — the dynamic watchlist the hourly scheduler
   scans: seeded with `EURUSD, GBPUSD, XAUUSD, USDJPY`, grown by `/add` and
   by every successful `/scan`, shrunk by `/remove`. Persisted to
   `data/watchlist.json` so a bot restart doesn't lose it.
 
-- **`main.py`** — every `AUTO_SCAN_INTERVAL_SECONDS` (default 3h), scans
+- **`main.py`** — every `AUTO_SCAN_INTERVAL_SECONDS` (default 1h), scans
   `watchlist_store`'s symbols through Scanner 1 -> Scanner 2 and pushes a
   Telegram/Discord alert only for setups that are both actively triggered
-  *and* at or above `MIN_SIGNAL_CONFIDENCE` (default 0.6) — everything else,
+  *and* at or above `MIN_SIGNAL_CONFIDENCE` (default 0.72) — everything else,
   including any `LOW_LIQUIDITY_CHOP` regime, stays silent. Also serves the
   webhook bridge + the Telegram bot concurrently in the same asyncio event
   loop. If `ENABLE_PAPER_TRADING=true`, each dispatched signal is also

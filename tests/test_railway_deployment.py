@@ -28,6 +28,22 @@ def test_invalid_railway_port_is_rejected() -> None:
         Settings(_env_file=None, port=0)
 
 
+def test_env_example_scanner_values_match_runtime_defaults() -> None:
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parents[1] / ".env.example"
+    values = {}
+    for line in example.read_text(encoding="utf-8").splitlines():
+        if line and not line.lstrip().startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            values[key] = value
+
+    defaults = Settings(_env_file=None)
+    assert int(values["AUTO_SCAN_INTERVAL_SECONDS"]) == defaults.auto_scan_interval_seconds
+    assert float(values["MIN_SIGNAL_CONFIDENCE"]) == defaults.min_signal_confidence
+    assert values["NOTIFY_NO_SIGNALS"].lower() == str(defaults.notify_no_signals).lower()
+
+
 def test_configured_volume_path_is_used_for_runtime_data(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         storage,
