@@ -146,6 +146,34 @@ def test_unauthorized_start_explains_why_the_panel_is_not_available(monkeypatch)
     assert "لا تملك صلاحية" in replies[0]
 
 
+def test_authorized_start_opens_the_telegram_control_keyboard(monkeypatch):
+    import asyncio
+    import src.telegram_bot as bot
+
+    sent = []
+
+    class MessageStub:
+        async def reply_text(self, text, **kwargs):
+            sent.append((text, kwargs))
+
+    update = type("UpdateStub", (), {
+        "effective_chat": type("ChatStub", (), {"id": 456, "type": "private"})(),
+        "effective_user": type("UserStub", (), {"id": 456})(),
+        "message": MessageStub(),
+    })()
+    settings = Settings(_env_file=None, telegram_allowed_user_id="456")
+    monkeypatch.setattr(bot, "get_settings", lambda: settings)
+
+    asyncio.run(bot.cmd_start(update, None))
+
+    assert len(sent) == 1
+    assert "متصل ويعمل بنجاح" in sent[0][0]
+    keyboard = sent[0][1]["reply_markup"]
+    assert keyboard is not None
+    assert len(keyboard.keyboard) == 4
+    assert any(button.text == bot.BTN_QUICK_SCAN for row in keyboard.keyboard for button in row)
+
+
 @pytest.mark.parametrize(
     ("telegram_delivered", "expected_text"),
     [
