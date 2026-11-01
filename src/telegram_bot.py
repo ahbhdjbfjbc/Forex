@@ -959,19 +959,30 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     """يعالج جميع ضغطات الأزرار التفاعلية (Inline Buttons) بسرعة وسهولة."""
     settings = get_settings()
     query = getattr(update, "callback_query", None)
-    if query is None or not query.data:
+    if query is None:
         return
 
     if not _is_authorized(update, settings):
         await query.answer("⚠️ غير مصرح لك باستخدام هذه اللوحة.", show_alert=True)
         return
 
+    if not query.data:
+        await query.answer("⚠️ بيانات الزر غير صالحة. افتح /menu من جديد.", show_alert=True)
+        return
+
+    msg_target = getattr(query, "message", None)
+    if msg_target is None:
+        await query.answer("⚠️ هذا الزر غير مرتبط برسالة قابلة للتحديث.", show_alert=True)
+        return
+
     await query.answer()
     data = query.data
-    msg_target = query.message
 
     if data.startswith("scan:"):
-        symbol = data.split(":", 1)[1]
+        symbol = _resolve_input_symbol(data.split(":", 1)[1])
+        if symbol is None:
+            await msg_target.reply_text("⚠️ رمز الزوج في زر الفحص غير صالح.")
+            return
         await msg_target.reply_text(f"⏳ جاري فحص {display_pair(symbol)}...")
         report = await asyncio.to_thread(run_on_demand_scan, symbol, settings)
         has_signal = "🎯 التوصية: دخول صفقة" in report
@@ -982,6 +993,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data.startswith("pub:"):
         symbol = _resolve_input_symbol(data.split(":", 1)[1])
         if not symbol:
+            await msg_target.reply_text("⚠️ رمز الزوج في زر النشر غير صالح.")
             return
         fetch_ticker = to_yfinance_ticker(symbol)
         primary_tf = settings.telegram_primary_timeframe
@@ -1017,26 +1029,54 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await msg_target.reply_text("⚠️ لم تعد إشارة الدخول فعالة حالياً لإرسالها.")
 
     elif data.startswith("add:"):
-        sym = data.split(":", 1)[1]
+        sym = _resolve_input_symbol(data.split(":", 1)[1])
+        if sym is None:
+            await msg_target.reply_text("⚠️ رمز الزوج في زر الإضافة غير صالح.")
+            return
         symbol, was_new = watchlist_store.add(sym)
+        if symbol is None:
+            await msg_target.reply_text("⚠️ تعذر التحقق من رمز الزوج لإضافته.")
+            return
         status_txt = f"✅ تمت إضافة {display_pair(symbol)}" if was_new else f"ℹ️ {display_pair(symbol)} مضاف مسبقاً"
         await msg_target.reply_text(status_txt, reply_markup=_build_add_symbols_inline_keyboard())
 
     elif data.startswith("rem:"):
-        sym = data.split(":", 1)[1]
+        sym = _resolve_input_symbol(data.split(":", 1)[1])
+        if sym is None:
+            await msg_target.reply_text("⚠️ رمز الزوج في زر الحذف غير صالح.")
+            return
         symbol, was_removed = watchlist_store.remove(sym)
+        if symbol is None:
+            await msg_target.reply_text("⚠️ تعذر التحقق من رمز الزوج لحذفه.")
+            return
         status_txt = f"🗑️ تم حذف {display_pair(symbol)} من القائمة." if was_removed else "ℹ️ الزوج غير موجود."
         await msg_target.reply_text(status_txt, reply_markup=_build_watchlist_inline_keyboard())
 
     elif data.startswith("evol:"):
         parts = data.split(":")
-        if len(parts) == 4:
-            _, strat, sym, tf = parts
-            await msg_target.reply_text(
-                f"🧪 جاري تشغيل اختبار {strat} على {display_pair(sym)} ({tf.upper()})... انتظر قليلاً."
-            )
-            report = await asyncio.to_thread(run_evolution, strat, sym, tf, settings)
-            await msg_target.reply_text(report)
+        if len(parts) != 4:
+            await msg_target.reply_text("⚠️ بيانات زر تطوير الاستراتيجية غير مكتملة. افتح /evolve من جديد.")
+            return
+        _, strat, raw_symbol, raw_timeframe = parts
+        strat = strat.lower()
+        symbol = _resolve_input_symbol(raw_symbol)
+        timeframe = raw_timeframe.lower()
+        valid_timeframes = {str(tf).lower() for tf in settings.timeframe_list}
+        valid_timeframes.add(settings.telegram_primary_timeframe.lower())
+        if strat not in evolver.PARAM_CLASSES or strat not in evolver.DEFAULT_GRIDS:
+            await msg_target.reply_text("⚠️ الاستراتيجية في هذا الزر غير معروفة. افتح /evolve من جديد.")
+            return
+        if symbol is None:
+            await msg_target.reply_text("⚠️ رمز الزوج في زر التطوير غير صالح.")
+            return
+        if timeframe not in valid_timeframes:
+            await msg_target.reply_text("⚠️ الإطار الزمني في زر التطوير غير مدعوم.")
+            return
+        await msg_target.reply_text(
+            f"🧪 جاري تشغيل اختبار {strat} على {display_pair(symbol)} ({timeframe.upper()})... انتظر قليلاً."
+        )
+        report = await asyncio.to_thread(run_evolution, strat, symbol, timeframe, settings)
+        await msg_target.reply_text(report)
 
     elif data == "action:open_scan_menu":
         await msg_target.reply_text(
@@ -1060,6 +1100,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await msg_target.reply_text(
             "➕ اضغط على أي زوج لإضافته إلى قائمة الفحص الدوري:",
             reply_markup=_build_add_symbols_inline_keyboard(),
+        )
+
+    else:
+        await msg_target.reply_text(
+            "⚠️ هذا الزر غير معروف أو انتهت صلاحيته. افتح /menu أو اطلب اللوحة مجدداً."
         )
 
 

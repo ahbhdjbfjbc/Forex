@@ -345,3 +345,132 @@ def test_telegram_error_handler_reports_failed_button_instead_of_silent_failure(
     assert len(replies) == 1
     assert "تعذر تنفيذ هذا الزر" in replies[0]
     assert "private error detail" not in replies[0]
+
+
+
+def test_inline_keyboard_callback_data_matches_registered_routes(monkeypatch):
+    from src import telegram_bot as bot
+
+    monkeypatch.setattr(bot.watchlist_store, "get_all", lambda: ["EURUSD=X", "GBPUSD"])
+    keyboards = [
+        bot._build_quick_scan_inline_keyboard(),
+        bot._build_report_action_keyboard("EURUSD", has_signal=True),
+        bot._build_watchlist_inline_keyboard(),
+        bot._build_add_symbols_inline_keyboard(),
+    ]
+    callback_data = [
+        button.callback_data
+        for keyboard in keyboards
+        for row in keyboard.inline_keyboard
+        for button in row
+    ]
+    action_routes = {
+        "action:scan_all", "action:open_scan_menu", "action:watchlist", "action:add_menu"
+    }
+    prefix_routes = {"scan", "pub", "add", "rem", "evol"}
+
+    assert callback_data
+    for data in callback_data:
+        assert data in action_routes or data.split(":", 1)[0] in prefix_routes
+
+
+@pytest.mark.parametrize(
+    ("callback_data", "expected_reply"),
+    [
+        ("unknown:old", "غير معروف"),
+        ("evol:trend_pullback", "غير مكتملة"),
+        ("scan:", "غير صالح"),
+        ("add:!!!", "غير صالح"),
+        ("rem:!!!", "غير صالح"),
+        ("evol:trend_pullback:EURUSD:999d", "غير مدعوم"),
+    ],
+)
+def test_invalid_or_stale_inline_callbacks_get_a_visible_response(
+    monkeypatch, callback_data, expected_reply
+):
+    import asyncio
+
+    from src import telegram_bot as bot
+
+    replies = []
+    answers = []
+
+    class MessageStub:
+        async def reply_text(self, text, **kwargs):
+            replies.append(text)
+
+    class QueryStub:
+        data = callback_data
+        message = MessageStub()
+
+        async def answer(self, *args, **kwargs):
+            answers.append((args, kwargs))
+
+    update = type("UpdateStub", (), {
+        "effective_chat": type("ChatStub", (), {"id": 456, "type": "private"})(),
+        "effective_user": type("UserStub", (), {"id": 456})(),
+        "callback_query": QueryStub(),
+    })()
+    monkeypatch.setattr(bot, "get_settings", lambda: Settings(_env_file=None))
+    monkeypatch.setattr(bot, "_is_authorized", lambda *_args: True)
+
+    asyncio.run(bot.handle_callback_query(update, None))
+
+    assert len(answers) == 1
+    assert any(expected_reply in reply for reply in replies)
+
+
+@pytest.mark.parametrize(
+    ("callback_data", "expected_reply"),
+    [
+        ("scan:EURUSD", "جاري فحص"),
+        ("action:open_scan_menu", "اختر الزوج"),
+        ("action:scan_all", "جاري فحص جميع الأزواج"),
+        ("action:watchlist", "قائمة المراقبة الحالية"),
+        ("action:add_menu", "اضغط على أي زوج"),
+        ("add:EURUSD", "تمت إضافة"),
+        ("rem:EURUSD", "تم حذف"),
+        ("evol:trend_pullback:EURUSD:1h", "جاري تشغيل اختبار"),
+    ],
+)
+def test_valid_inline_callback_routes_return_their_expected_result(
+    monkeypatch, callback_data, expected_reply
+):
+    import asyncio
+
+    from src import telegram_bot as bot
+
+    replies = []
+
+    class MessageStub:
+        async def reply_text(self, text, **kwargs):
+            replies.append(text)
+
+    class QueryStub:
+        data = callback_data
+        message = MessageStub()
+
+        async def answer(self, *args, **kwargs):
+            pass
+
+    update = type("UpdateStub", (), {
+        "effective_chat": type("ChatStub", (), {"id": 456, "type": "private"})(),
+        "effective_user": type("UserStub", (), {"id": 456})(),
+        "callback_query": QueryStub(),
+    })()
+    monkeypatch.setattr(bot, "get_settings", lambda: Settings(_env_file=None))
+    monkeypatch.setattr(bot, "_is_authorized", lambda *_args: True)
+    monkeypatch.setattr(bot, "run_on_demand_scan", lambda *_args: "تقرير فحص تجريبي")
+    monkeypatch.setattr(bot, "run_full_watchlist_scan", lambda *_args: "تقرير شامل تجريبي")
+    monkeypatch.setattr(bot, "run_evolution", lambda *_args: "تقرير تطوير تجريبي")
+    monkeypatch.setattr(bot, "_build_report_action_keyboard", lambda *_args: None)
+    monkeypatch.setattr(bot, "_build_quick_scan_inline_keyboard", lambda: None)
+    monkeypatch.setattr(bot, "_build_watchlist_inline_keyboard", lambda: None)
+    monkeypatch.setattr(bot, "_build_add_symbols_inline_keyboard", lambda: None)
+    monkeypatch.setattr(bot.watchlist_store, "get_all", lambda: ["EURUSD"])
+    monkeypatch.setattr(bot.watchlist_store, "add", lambda symbol: (symbol, True))
+    monkeypatch.setattr(bot.watchlist_store, "remove", lambda symbol: (symbol, True))
+
+    asyncio.run(bot.handle_callback_query(update, None))
+
+    assert any(expected_reply in reply for reply in replies)

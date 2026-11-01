@@ -199,10 +199,10 @@ def test_telegram_command_menu_api_failure_does_not_disable_polling(monkeypatch)
 
 
 def test_control_panel_commands_are_registered_with_telegram_application() -> None:
-    from telegram.ext import CommandHandler
-    from src.telegram_bot import build_telegram_application
+    from telegram.ext import CallbackQueryHandler, CommandHandler
+    from src import telegram_bot as bot
 
-    application = build_telegram_application(
+    application = bot.build_telegram_application(
         Settings(_env_file=None, telegram_bot_token="123:TEST")
     )
     registered = {
@@ -214,6 +214,12 @@ def test_control_panel_commands_are_registered_with_telegram_application() -> No
     }
 
     assert {"start", "menu", "scan", "scan_all"} <= registered
+    assert any(
+        isinstance(handler, CallbackQueryHandler)
+        and handler.callback is bot.handle_callback_query
+        for handlers in application.handlers.values()
+        for handler in handlers
+    )
 
 
 def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
