@@ -366,7 +366,7 @@ class TestTradingViewBridge:
         assert resp.json()["status"] == "ok"
 
     def test_valid_alert_accepted(self, client, monkeypatch):
-        monkeypatch.setattr("src.tradingview_bridge.send_alert", lambda signal: {
+        monkeypatch.setattr("src.tradingview_bridge.send_alert", lambda signal, **_kwargs: {
             "telegram": True, "discord": False, "desktop": False,
         })
         payload = {

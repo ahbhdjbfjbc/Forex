@@ -225,7 +225,12 @@ def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
     )
     regime = SimpleNamespace(confidence=0.8, symbol="EURUSD", timeframe="1h")
     settings = Settings(_env_file=None, min_signal_confidence=0.6)
-    frame = SimpleNamespace(index=["2026-10-30T16:00:00Z"])
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {"High": [1.086], "Low": [1.084], "Close": [1.085]},
+        index=["2026-10-30T16:00:00Z"],
+    )
     alerts = []
     paper_trades = []
 
@@ -236,7 +241,10 @@ def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
     monkeypatch.setattr(app, "monitor_news_state", lambda _settings: False)
     monkeypatch.setattr(app, "scan_symbols_with_data", lambda _symbols, _settings: [(regime, frame)])
     monkeypatch.setattr(app, "generate_signal", lambda *_args, **_kwargs: signal)
-    monkeypatch.setattr(app, "send_alert", lambda delivered, _settings: alerts.append(delivered) or {"telegram": True})
+    monkeypatch.setattr(
+        app, "send_alert",
+        lambda delivered, _settings, **_kwargs: alerts.append(delivered) or {"telegram": True},
+    )
     monkeypatch.setattr(app, "execute_paper_trade", lambda *args, **_kwargs: paper_trades.append(args))
 
     app.run_scan_cycle(settings)

@@ -104,7 +104,7 @@ def test_http_recent_endpoint_does_not_expose_secret():
 
 def test_webhook_rejects_wrong_side_stop_without_storing_alert(monkeypatch):
     from fastapi.testclient import TestClient
-    monkeypatch.setattr(bridge, "send_alert", lambda signal: None)
+    monkeypatch.setattr(bridge, "send_alert", lambda signal, **_kwargs: None)
     client = TestClient(bridge.app)
     response = client.post("/webhook/tradingview", json={
         "ticker": "XAUUSD", "timeframe": "15", "signal": "BUY", "price": 4300,
@@ -116,7 +116,7 @@ def test_webhook_rejects_wrong_side_stop_without_storing_alert(monkeypatch):
 
 def test_webhook_returns_multistatus_when_no_channel_reports_delivery(monkeypatch):
     from fastapi.testclient import TestClient
-    monkeypatch.setattr(bridge, "send_alert", lambda signal: {
+    monkeypatch.setattr(bridge, "send_alert", lambda signal, **_kwargs: {
         "telegram": False, "discord": False, "desktop": False,
     })
     client = TestClient(bridge.app)
@@ -131,7 +131,7 @@ def test_webhook_returns_multistatus_when_no_channel_reports_delivery(monkeypatc
 
 def test_webhook_reports_success_when_a_channel_reports_delivery(monkeypatch):
     from fastapi.testclient import TestClient
-    monkeypatch.setattr(bridge, "send_alert", lambda signal: {
+    monkeypatch.setattr(bridge, "send_alert", lambda signal, **_kwargs: {
         "telegram": True, "discord": False, "desktop": False,
     })
     client = TestClient(bridge.app)
@@ -146,7 +146,7 @@ def test_webhook_reports_success_when_a_channel_reports_delivery(monkeypatch):
 def test_webhook_rejects_exact_short_window_replay(monkeypatch):
     from fastapi.testclient import TestClient
     calls = []
-    monkeypatch.setattr(bridge, "send_alert", lambda signal: calls.append(signal) or {
+    monkeypatch.setattr(bridge, "send_alert", lambda signal, **_kwargs: calls.append(signal) or {
         "telegram": True, "discord": False, "desktop": False,
     })
     client = TestClient(bridge.app)
@@ -157,8 +157,67 @@ def test_webhook_rejects_exact_short_window_replay(monkeypatch):
     first = client.post("/webhook/tradingview", json=payload)
     second = client.post("/webhook/tradingview", json=payload)
     assert first.status_code == 200
-    assert second.status_code == 409
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate_suppressed"
     assert len(calls) == 1
+
+
+def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from config import Settings
+    from src import notifier
+    from src.signal_lifecycle import SignalLifecycleStore
+
+    lifecycle = SignalLifecycleStore(tmp_path / "signal-state.sqlite3")
+    settings = Settings(_env_file=None, min_risk_reward=2.0)
+    messages = []
+    monkeypatch.setattr(bridge, "signal_lifecycle", lifecycle)
+    monkeypatch.setattr(notifier, "signal_lifecycle", lifecycle)
+    monkeypatch.setattr(notifier, "get_settings", lambda: settings)
+    monkeypatch.setattr(bridge, "send_alert", notifier.send_alert)
+    monkeypatch.setattr(
+        notifier,
+        "dispatch_message",
+        lambda message, _settings=None: messages.append(message) or {"telegram": True},
+    )
+    client = TestClient(bridge.app)
+    base = {
+        "ticker": "EURUSD", "timeframe": "15", "signal": "BUY",
+        "secret": "test-secret-which-is-longer-than-32-chars",
+    }
+
+    first = client.post("/webhook/tradingview", json={**base, "price": 1.085})
+    repeated = client.post("/webhook/tradingview", json={**base, "price": 1.086})
+    closed = client.post("/webhook/tradingview", json={**base, "price": 1.092})
+    still_blocked = client.post("/webhook/tradingview", json={**base, "price": 1.093})
+
+    assert first.json()["status"] == "ok"
+    assert repeated.json()["status"] == "duplicate_suppressed"
+    assert closed.json()["status"] == "duplicate_suppressed"
+    assert still_blocked.json()["status"] == "duplicate_suppressed"
+    assert len(messages) == 2
+    assert "توصية تداول احترافية جديدة" in messages[0]
+    assert "نتيجة التوصية" in messages[1]
+    assert "تحقق الهدف الثاني" in messages[1]
+
+    reset = client.post(
+        "/webhook/tradingview",
+        json={**base, "signal": "NONE", "price": 1.093},
+    )
+    next_setup = client.post("/webhook/tradingview", json={**base, "price": 1.094})
+    assert reset.json()["status"] == "reset"
+    assert next_setup.json()["status"] == "ok"
+    assert len(messages) == 3
+
+
+def test_tradingview_bar_time_accepts_unix_milliseconds():
+    alert = TradingViewAlert(
+        ticker="EURUSD", timeframe="15", signal="BUY", price=1.085,
+        bar_time=1710000000000,
+        secret="test-secret-which-is-longer-than-32-chars",
+    )
+    assert alert.bar_time == "1710000000000"
 
 
 def test_explicit_take_profit_is_validated_and_used():

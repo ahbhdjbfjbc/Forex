@@ -36,7 +36,7 @@ def test_webhook_enforces_per_peer_rate_limit(monkeypatch):
         risk_percent_per_trade=1.0,
         min_risk_reward=2.0,
     ))
-    monkeypatch.setattr(bridge, "send_alert", lambda signal: {
+    monkeypatch.setattr(bridge, "send_alert", lambda signal, **_kwargs: {
         "telegram": True, "discord": False, "desktop": False,
     })
     client = TestClient(bridge.app)

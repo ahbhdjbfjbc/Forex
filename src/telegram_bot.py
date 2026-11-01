@@ -55,10 +55,12 @@ from src.notifier import (
     STRATEGY_LABELS,
     dispatch_message,
     send_alert,
+    send_signal_outcome,
 )
 from src.oanda_client import PaperTradingConfigError, PaperTradingRequestError
 from src.scanner_1_regime import scan_regime_with_data, scan_symbols_with_data
 from src.scanner_2_strategy import generate_signal
+from src.signal_lifecycle import signal_lifecycle
 from src.strategy_params import get_strategy_params
 from src.symbol_resolver import display_pair, instrument_type, sanitize_symbol, to_yfinance_ticker
 from src.watchlist_store import watchlist_store
@@ -452,14 +454,37 @@ def run_full_watchlist_scan(settings: Settings | None = None) -> str:
 
     for regime_result, df in regime_data:
         pair_str = f"{display_pair(regime_result.symbol)} ({regime_result.timeframe.upper()})"
+        try:
+            outcome = signal_lifecycle.observe_frame(
+                regime_result.symbol, regime_result.timeframe, df
+            )
+            if outcome is not None:
+                send_signal_outcome(outcome, settings)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            logger.exception(
+                "could not evaluate active recommendation outcome for %s/%s",
+                regime_result.symbol, regime_result.timeframe,
+            )
+
         signal = generate_signal(regime_result, df, settings)
         if signal is not None and regime_result.confidence >= settings.min_signal_confidence:
             dir_emoji = DIRECTION_EMOJI.get(signal.direction, "")
             dir_label = DIRECTION_LABELS.get(signal.direction, signal.direction.value)
             conf_pct = int(round(regime_result.confidence * 100))
-            found_signals.append(f"✅ {pair_str}: {dir_label} {dir_emoji} (الدقة: {conf_pct}%)")
-            send_alert(signal, settings)
+            delivery = send_alert(
+                signal, settings, source="telegram-scan-all", entry_bar_id=str(df.index[-1])
+            )
+            if delivery.get("duplicate"):
+                state = "لديها توصية نشطة بالفعل؛ لم تُكرر الرسالة"
+            elif any(value for channel, value in delivery.items() if channel != "duplicate"):
+                state = "تم إرسالها"
+            else:
+                state = "تعذر إرسالها؛ تحقق من إعدادات قنوات الإشعار"
+            found_signals.append(
+                f"✅ {pair_str}: {dir_label} {dir_emoji} (الدقة: {conf_pct}%) — {state}"
+            )
         else:
+            signal_lifecycle.reset_block(regime_result.symbol, regime_result.timeframe)
             reg_label = REGIME_LABELS.get(regime_result.regime, regime_result.regime.value)
             ranging_or_waiting.append(f"⏳ {pair_str}: {reg_label}")
 
@@ -469,7 +494,7 @@ def run_full_watchlist_scan(settings: Settings | None = None) -> str:
         "----------------------------------",
     ]
     if found_signals:
-        lines.append("🎯 الفرص المكتملة (تم إرسالها للقناة):")
+        lines.append("🎯 التوصيات والفرص المكتملة:")
         lines.extend(found_signals)
         lines.append("----------------------------------")
     else:
@@ -967,7 +992,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             regime_result, df = outcome
             signal = generate_signal(regime_result, df, settings)
             if signal:
-                delivery = await asyncio.to_thread(send_alert, signal, settings)
+                delivery = await asyncio.to_thread(
+                    send_alert,
+                    signal,
+                    settings,
+                    source="telegram-publish",
+                    entry_bar_id=str(df.index[-1]),
+                )
+                if delivery.get("duplicate"):
+                    await msg_target.reply_text(
+                        "ℹ️ لهذه التوصية سجل نشط أو نتيجة حديثة؛ لم أكرر نشرها."
+                    )
+                    return
                 if delivery.get("telegram"):
                     await msg_target.reply_text(
                         f"✅ تم إرسال توصية {display_pair(symbol)} إلى القناة بنجاح!"
@@ -1032,6 +1068,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not update.message or not update.message.text:
         return
     if not _is_authorized(update, settings):
+        await update.message.reply_text("⚠️ غير مصرح لك باستخدام لوحة التحكم هذه.")
         return
 
     text = update.message.text.strip()
@@ -1077,6 +1114,25 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
+async def handle_telegram_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log a safe error type and tell the user when a button/command failed."""
+    error = getattr(context, "error", None)
+    logger.error("Telegram update handler failed (%s)", type(error).__name__)
+    message = getattr(update, "effective_message", None)
+    if message is None:
+        query = getattr(update, "callback_query", None)
+        message = getattr(query, "message", None)
+    if message is None or not hasattr(message, "reply_text"):
+        return
+    try:
+        await message.reply_text(
+            "⚠️ تعذر تنفيذ هذا الزر الآن بسبب خطأ داخلي. أعد المحاولة، "
+            "وإذا تكرر الأمر فأرسل /status للمشرف."
+        )
+    except Exception as reply_error:
+        logger.warning("could not report Telegram handler error (%s)", type(reply_error).__name__)
+
+
 def build_telegram_application(settings: Settings | None = None) -> Application:
     if Application is None:
         raise RuntimeError(
@@ -1102,4 +1158,5 @@ def build_telegram_application(settings: Settings | None = None) -> Application:
         application.add_handler(CallbackQueryHandler(handle_callback_query))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
+    application.add_error_handler(handle_telegram_error)
     return application

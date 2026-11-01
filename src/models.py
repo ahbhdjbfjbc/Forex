@@ -121,6 +121,7 @@ class TradingViewAlert(BaseModel):
             "timeframe": "15m",
             "signal": "BUY",
             "price": 1.0850,
+            "bar_time": 1710000000000,
             "secret": "change-me-to-a-long-random-string"
         }
     """
@@ -129,6 +130,7 @@ class TradingViewAlert(BaseModel):
     timeframe: str = Field(..., min_length=1, max_length=16)
     signal: TradeDirection | str
     price: float = Field(..., gt=0)
+    bar_time: str | None = Field(default=None, max_length=64)
     # Credentials are excluded from model dumps and repr to avoid accidental
     # disclosure in diagnostics or future serialization paths.
     secret: str | None = Field(default=None, repr=False, exclude=True, max_length=512)
@@ -151,6 +153,22 @@ class TradingViewAlert(BaseModel):
             raise ValueError("timeframe contains invalid characters")
         return normalized
 
+    @field_validator("bar_time", mode="before")
+    @classmethod
+    def _normalize_bar_time(cls, value) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            if not math.isfinite(float(value)) or float(value) <= 0:
+                raise ValueError("bar_time must be a positive timestamp")
+            return str(int(value))
+        normalized = str(value).strip()
+        if not normalized or len(normalized) > 64:
+            raise ValueError("bar_time is invalid")
+        if not re.fullmatch(r"[0-9TtZz:+.\- ]{1,64}", normalized):
+            raise ValueError("bar_time contains invalid characters")
+        return normalized
+
     @field_validator("strategy")
     @classmethod
     def _normalize_strategy(cls, value: str | None) -> str | None:
@@ -165,8 +183,8 @@ class TradingViewAlert(BaseModel):
     @classmethod
     def _normalize_signal(cls, v: str) -> str:
         v_upper = str(v).upper().strip()
-        if v_upper not in {"BUY", "SELL"}:
-            raise ValueError(f"signal must be BUY or SELL, got {v!r}")
+        if v_upper not in {"BUY", "SELL", "NONE"}:
+            raise ValueError(f"signal must be BUY, SELL, or NONE, got {v!r}")
         return v_upper
 
     @field_validator("ticker")

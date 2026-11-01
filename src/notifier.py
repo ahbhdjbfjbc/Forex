@@ -16,6 +16,7 @@ import httpx
 
 from config import Settings, get_settings
 from src.models import MarketRegime, StrategyType, TradeDirection, TradeSignal
+from src.signal_lifecycle import SignalOutcome, signal_lifecycle
 from src.symbol_resolver import instrument_type
 
 logger = logging.getLogger(__name__)
@@ -195,12 +196,78 @@ def dispatch_message(message: str, settings: Settings | None = None) -> dict[str
     return results
 
 
-def send_alert(signal: TradeSignal, settings: Settings | None = None) -> dict[str, bool]:
-    """Format the signal once and dispatch to every channel independently.
-    Returns a per-channel success map; never raises."""
+def format_signal_outcome(outcome: SignalOutcome) -> str:
+    """Format one terminal price outcome without implying broker execution."""
+    result_labels = {
+        "TAKE_PROFIT_2": "تحقق الهدف الثاني",
+        "STOP_LOSS": "تحقق وقف الخسارة",
+        "AMBIGUOUS_STOP_FIRST": "لامست الشمعة الوقف والهدف معاً؛ احتُسب الوقف تحفظياً لأن ترتيب اللمس غير معروف",
+        "REVERSED": "أُغلقت التوصية عند ظهور إشارة معاكسة",
+    }
+    tp1_note = "\nℹ️ سبق تسجيل لمس الهدف الأول." if outcome.tp1_reached else ""
+    return (
+        "📊 نتيجة التوصية (متابعة سعرية تقديرية من OHLCV، وليست إثبات تنفيذ لدى وسيط)\n"
+        f"📌 {format_pair(outcome.symbol)} — {outcome.timeframe.upper()} — {outcome.direction}\n"
+        f"📍 الدخول: {outcome.entry_price:g} | الخروج المحتسب: {outcome.exit_price:g}\n"
+        f"🏁 النتيجة: {result_labels.get(outcome.outcome, outcome.outcome)}\n"
+        f"📐 المحصلة النظرية: {outcome.r_multiple:+g}R{tp1_note}\n"
+        f"🕒 الإغلاق: {outcome.closed_at} UTC\n"
+        f"🆔 رقم التوصية: {outcome.signal_id}"
+    )
+
+
+def send_signal_outcome(
+    outcome: SignalOutcome, settings: Settings | None = None
+) -> dict[str, bool]:
+    """Dispatch a terminal result and acknowledge it in the durable outbox."""
+    results = dispatch_message(format_signal_outcome(outcome), settings)
+    if any(results.values()):
+        signal_lifecycle.mark_outcome_sent(outcome.signal_id)
+    return results
+
+
+def flush_pending_signal_outcomes(settings: Settings | None = None) -> None:
+    """Retry locally pending outcome notifications on the next bot activity."""
+    for outcome in signal_lifecycle.pending_outcomes():
+        send_signal_outcome(outcome, settings)
+
+
+def send_alert(
+    signal: TradeSignal,
+    settings: Settings | None = None,
+    *,
+    source: str = "unknown",
+    entry_bar_id: str | None = None,
+) -> dict[str, bool]:
+    """Publish a new active idea once; duplicates stay silent until setup reset or exit."""
     settings = settings or get_settings()
+    if not isinstance(signal, TradeSignal):
+        # Retain the simple formatter/dispatcher contract for adapters and tests.
+        return dispatch_message(format_message(signal), settings)
+
+    flush_pending_signal_outcomes(settings)
+    tick_outcome = signal_lifecycle.observe_price(
+        signal.symbol, signal.timeframe, signal.entry_price
+    )
+    if tick_outcome is not None:
+        send_signal_outcome(tick_outcome, settings)
+
+    registration = signal_lifecycle.register_signal(
+        signal, source=source, entry_bar_id=entry_bar_id
+    )
+    if registration.closed_outcome is not None:
+        send_signal_outcome(registration.closed_outcome, settings)
+    if not registration.accepted:
+        logger.info(
+            "suppressing repeated %s signal for %s/%s while the setup is active or blocked",
+            signal.direction.value, signal.symbol, signal.timeframe,
+        )
+        return {"telegram": False, "discord": False, "desktop": False, "duplicate": True}
+
     message = format_message(signal)
     results = dispatch_message(message, settings)
+    if not any(results.values()):
+        signal_lifecycle.cancel_signal(registration.signal_id)
     if not any(results.values()):
         logger.warning(
             "no notification channel is configured/succeeded for %s %s signal",

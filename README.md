@@ -155,8 +155,11 @@ environment variables, persistent storage, and health-check settings.
 
 1. Add `pine_script/tv_indicator.pine` as an indicator on your chart.
 2. Create an alert on "Any alert() function call" (recommended — the script
-   already builds the JSON payload for you), or on one of the
-   `alertcondition()`s if you prefer to compose the message by hand.
+   includes `bar_time` and sends price updates while BUY/SELL conditions remain
+   active so the bot can monitor TP/SL; the server suppresses duplicate posts).
+   It sends `NONE` once when the setup clears, allowing a later fresh signal in
+   the same direction. `alertcondition()` alerts are also de-duplicated, but do
+   not include `bar_time` or send the reset event.
 3. For public use, set the webhook URL to `https://<your-domain>/webhook/tradingview`.
    Put Uvicorn behind an HTTPS-terminating reverse proxy on port 443; do not
    expose the plain-HTTP Uvicorn port directly to the internet. The app applies
@@ -180,9 +183,14 @@ environment variables, persistent storage, and health-check settings.
 - No real-money order execution — `src/oanda_client.py` only ever talks to
   OANDA's practice/demo endpoint; this is simulated paper trading, opt-in
   and off by default.
-- No relational database — `data/` holds plain JSON files (watchlist,
-  strategy params, backtest proposals, param backups); everything else
-  (metrics, signals) is computed fresh each scan cycle.
+- Mutable watchlist/strategy files remain JSON under `data/`; open
+  recommendations and their one-shot outcome outbox are stored in
+  `data/signal_lifecycle.sqlite3` (or `FOREX_DATA_DIR`). Mount persistent storage
+  for this directory in production so active recommendations survive redeploys.
+- Signal results are estimated from OHLCV price touches, not broker fills.
+  TP1 is recorded as progress; the recommendation stays open until TP2 or SL.
+  If one candle touches both SL and TP, the bot conservatively records SL first
+  because OHLCV cannot reveal the intrabar order.
 - The backtester's equity curve is realized-P&L-only (marked to market at
   trade close, not intra-trade), and only TP1 is simulated as an exit
   target — see the module docstring in `backtester.py` for the full list of

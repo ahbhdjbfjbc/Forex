@@ -40,7 +40,8 @@ from src.models import (
     TradingViewAlert,
     WebhookAck,
 )
-from src.notifier import send_alert
+from src.notifier import flush_pending_signal_outcomes, send_alert, send_signal_outcome
+from src.signal_lifecycle import signal_lifecycle
 from src.symbol_resolver import instrument_type
 
 logger = logging.getLogger(__name__)
@@ -49,9 +50,9 @@ app = FastAPI(title="Forex Scanner — TradingView Bridge")
 
 # Small in-memory ring buffer for debugging/inspection; not a persistence layer.
 _RECENT_ALERTS: deque[TradingViewAlert] = deque(maxlen=100)
-# Short-window in-process deduplication prevents TradingView retries/replays of
-# the exact same alert from spamming subscribers. This is not durable across
-# process restarts; it is a defensive mitigation, not a replacement for TLS.
+# This short cache prevents immediate retries of byte-identical payloads. The
+# durable active-signal registry separately suppresses the same live setup
+# when price changes or a new bar produces a fresh TradingView alert.
 _ALERT_DEDUPE_SECONDS = 15.0
 _ALERT_DEDUPE_MAX = 2048
 _SEEN_ALERTS: dict[str, float] = {}
@@ -348,6 +349,15 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
     _verify_secret(alert.secret)
     logger.info("received TradingView alert: %s %s @ %.5f (%s)", alert.ticker, alert.signal, alert.price, alert.timeframe)
 
+    flush_pending_signal_outcomes()
+    if alert.signal == "NONE":
+        outcome = signal_lifecycle.observe_price(alert.ticker, alert.timeframe, alert.price)
+        if outcome is not None:
+            send_signal_outcome(outcome)
+        signal_lifecycle.reset_block(alert.ticker, alert.timeframe)
+        _RECENT_ALERTS.append(alert.model_copy(update={"secret": None}))
+        return WebhookAck(status="reset", detail="no active setup; future signals may be accepted")
+
     try:
         signal = _alert_to_signal(alert)
     except HTTPException:
@@ -358,13 +368,15 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
 
     fingerprint = _alert_fingerprint(alert)
     if not _claim_alert_fingerprint(fingerprint):
-        raise HTTPException(status_code=409, detail="duplicate alert recently received")
+        return WebhookAck(status="duplicate_suppressed", detail="identical alert was already received")
 
     # Do not retain the credential after verification; recent-alert inspection
     # only needs the public signal fields.
     _RECENT_ALERTS.append(alert.model_copy(update={"secret": None}))
     try:
-        dispatch_results = send_alert(signal)
+        dispatch_results = send_alert(
+            signal, source="tradingview", entry_bar_id=alert.bar_time
+        )
     except Exception as exc:
         _release_alert_fingerprint(fingerprint)
         logger.error("failed to dispatch alert for %s (%s)", alert.ticker, type(exc).__name__)
@@ -373,7 +385,15 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
             content=WebhookAck(status="delivery_failed", detail="alert stored but notification dispatch failed").model_dump(),
         )
 
-    if not isinstance(dispatch_results, dict) or not any(value is True for value in dispatch_results.values()):
+    if isinstance(dispatch_results, dict) and dispatch_results.get("duplicate"):
+        return WebhookAck(
+            status="duplicate_suppressed",
+            detail=f"{alert.ticker}/{alert.timeframe} already has an active or recently closed setup",
+        )
+
+    if not isinstance(dispatch_results, dict) or not any(
+        value is True for channel, value in dispatch_results.items() if channel != "duplicate"
+    ):
         # Permit a caller/TradingView retry after a transient no-channel failure.
         _release_alert_fingerprint(fingerprint)
         logger.warning("alert validated for %s but no notification channel reported delivery", alert.ticker)

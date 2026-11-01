@@ -114,14 +114,23 @@ plotshape(shortSignal, title = "Short Trigger", style = shape.triangledown, loca
 // ---------------------------------------------------------------------------
 // Webhook alert payloads — match src/models.py TradingViewAlert schema
 // ---------------------------------------------------------------------------
-longMessage  = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe.period + '", "signal": "BUY", "price": ' + str.tostring(close) + ', "secret": "' + webhookSecret + '", "strategy": "pine_bridge"}'
-shortMessage = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe.period + '", "signal": "SELL", "price": ' + str.tostring(close) + ', "secret": "' + webhookSecret + '", "strategy": "pine_bridge"}'
+longMessage  = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe.period + '", "bar_time": ' + str.tostring(time) + ', "signal": "BUY", "price": ' + str.tostring(close) + ', "secret": "' + webhookSecret + '", "strategy": "pine_bridge"}'
+shortMessage = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe.period + '", "bar_time": ' + str.tostring(time) + ', "signal": "SELL", "price": ' + str.tostring(close) + ', "secret": "' + webhookSecret + '", "strategy": "pine_bridge"}'
+noneMessage  = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe.period + '", "bar_time": ' + str.tostring(time) + ', "signal": "NONE", "price": ' + str.tostring(close) + ', "secret": "' + webhookSecret + '", "strategy": "pine_bridge"}'
 
-if enableAlerts and longSignal
-    alert(longMessage, alert.freq_once_per_bar_close)
-
-if enableAlerts and shortSignal
-    alert(shortMessage, alert.freq_once_per_bar_close)
+signalState = longSignal ? "BUY" : shortSignal ? "SELL" : "NONE"
+var string lastAlertState = "NONE"
+// BUY/SELL updates continue while a setup is active so Python can monitor its
+// price and resolve TP/SL. The durable server registry suppresses repeat posts.
+// Emit NONE only on the transition out of a signal to re-arm a future setup.
+if enableAlerts and barstate.isconfirmed
+    if signalState == "BUY"
+        alert(longMessage, alert.freq_once_per_bar_close)
+    else if signalState == "SELL"
+        alert(shortMessage, alert.freq_once_per_bar_close)
+    else if lastAlertState != "NONE"
+        alert(noneMessage, alert.freq_once_per_bar_close)
+lastAlertState := signalState
 
 alertcondition(longSignal, title = "Forex Scanner Long", message = "BUY {{ticker}} {{interval}} @ {{close}}")
 alertcondition(shortSignal, title = "Forex Scanner Short", message = "SELL {{ticker}} {{interval}} @ {{close}}")

@@ -36,14 +36,17 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from config import Settings, get_settings
 from src.notifier import (
+    flush_pending_signal_outcomes,
     send_alert,
     send_news_pause_alert,
     send_news_resume_alert,
     send_no_signal_alert,
+    send_signal_outcome,
 )
 from src.paper_executor import execute_paper_trade
 from src.scanner_1_regime import scan_symbols_with_data
 from src.scanner_2_strategy import generate_signal
+from src.signal_lifecycle import normalize_symbol, signal_lifecycle
 from src.telegram_bot import build_telegram_application, publish_telegram_command_menu
 from src.tradingview_bridge import app as webhook_app
 from src.watchlist_store import watchlist_store
@@ -139,7 +142,11 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
         logger.info("auto-scan cycle paused due to active high-impact economic news")
         return
 
-    symbols = watchlist_store.get_all()
+    flush_pending_signal_outcomes(settings)
+    scan_symbols = {normalize_symbol(symbol): symbol for symbol in watchlist_store.get_all()}
+    for active_symbol in signal_lifecycle.active_symbols():
+        scan_symbols.setdefault(normalize_symbol(active_symbol), active_symbol)
+    symbols = sorted(scan_symbols.values())
     logger.info(
         "starting auto-scan cycle: %d watchlist symbols x %d timeframes",
         len(symbols), len(settings.timeframe_list),
@@ -150,8 +157,25 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
     suppressed_low_confidence = 0
 
     for regime_result, df in regime_data:
+        bar_id = None
+        symbol = getattr(regime_result, "symbol", None)
+        timeframe = getattr(regime_result, "timeframe", None)
+        if symbol and timeframe:
+            try:
+                bar_id = str(df.index[-1])
+                outcome = signal_lifecycle.observe_frame(symbol, timeframe, df)
+                if outcome is not None:
+                    send_signal_outcome(outcome, settings)
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+                logger.exception(
+                    "could not evaluate active recommendation outcome for %s/%s",
+                    symbol, timeframe,
+                )
+
         signal = generate_signal(regime_result, df, settings)
         if signal is None:
+            if symbol and timeframe:
+                signal_lifecycle.reset_block(symbol, timeframe)
             continue
         if regime_result.confidence < settings.min_signal_confidence:
             suppressed_low_confidence += 1
@@ -167,9 +191,14 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
                 signal.symbol, signal.timeframe,
             )
             continue
-        send_alert(signal, settings)
-        signals_sent += 1
-        execute_paper_trade(signal, settings)  # no-op unless ENABLE_PAPER_TRADING=true
+        delivery = send_alert(
+            signal, settings, source="auto-scan", entry_bar_id=bar_id
+        )
+        if delivery.get("duplicate"):
+            continue
+        if any(value for channel, value in delivery.items() if channel != "duplicate"):
+            signals_sent += 1
+            execute_paper_trade(signal, settings)  # no-op unless ENABLE_PAPER_TRADING=true
 
     logger.info(
         "auto-scan cycle complete: %d/%d (symbol,timeframe) pairs returned data, "
@@ -177,6 +206,7 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
         len(regime_data), len(symbols) * len(settings.timeframe_list),
         signals_sent, suppressed_low_confidence,
     )
+    flush_pending_signal_outcomes(settings)
 
     # إرسال تنبيه في حال وجود تذبذب وعدم توفر توصيات جيدة خلال هذه الساعة
     if signals_sent == 0 and len(regime_data) > 0 and getattr(settings, "notify_no_signals", False):

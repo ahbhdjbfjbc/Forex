@@ -185,6 +185,7 @@ def test_publish_callback_reports_actual_telegram_delivery(
     monkeypatch, telegram_delivered, expected_text
 ):
     import asyncio
+    from types import SimpleNamespace
     import src.telegram_bot as bot
 
     replies = []
@@ -207,7 +208,10 @@ def test_publish_callback_reports_actual_telegram_delivery(
     })()
     settings = Settings(_env_file=None, telegram_allowed_user_id="456")
     monkeypatch.setattr(bot, "get_settings", lambda: settings)
-    monkeypatch.setattr(bot, "scan_regime_with_data", lambda *args, **kwargs: (object(), object()))
+    monkeypatch.setattr(
+        bot, "scan_regime_with_data",
+        lambda *args, **kwargs: (object(), SimpleNamespace(index=["test-bar"])),
+    )
     monkeypatch.setattr(bot, "generate_signal", lambda *args, **kwargs: object())
     monkeypatch.setattr(
         bot,
@@ -258,3 +262,86 @@ def test_no_signal_notification_uses_configured_scan_interval(monkeypatch):
     assert len(message) == 1
     assert "كل 30 دقيقة" in message[0]
     assert "بعد ساعة واحدة" not in message[0]
+
+
+
+def test_reply_keyboard_buttons_reach_their_existing_handlers(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from src import telegram_bot as bot
+
+    calls = []
+    monkeypatch.setattr(bot, "get_settings", lambda: Settings(_env_file=None))
+    monkeypatch.setattr(bot, "_is_authorized", lambda *_args: True)
+
+    def fake_handler(name):
+        async def _handler(*args, **_kwargs):
+            calls.append((name, args[-1] if name == "_handle_scan_request" else None))
+        return _handler
+
+    handler_names = (
+        "cmd_scan", "cmd_scan_all", "cmd_watchlist", "_handle_scan_request",
+        "cmd_status", "cmd_evolve", "cmd_start",
+    )
+    for handler_name in handler_names:
+        monkeypatch.setattr(bot, handler_name, fake_handler(handler_name))
+
+    buttons = [
+        (bot.BTN_QUICK_SCAN, "cmd_scan", None),
+        (bot.BTN_SCAN_ALL, "cmd_scan_all", None),
+        (bot.BTN_WATCHLIST, "cmd_watchlist", None),
+        (bot.BTN_GOLD, "_handle_scan_request", "XAUUSD"),
+        (bot.BTN_BTC, "_handle_scan_request", "BTCUSD"),
+        (bot.BTN_BOT_STATUS, "cmd_status", None),
+        (bot.BTN_EVOLVE_MENU, "cmd_evolve", None),
+        (bot.BTN_HELP, "cmd_start", None),
+    ]
+    for text, expected_handler, expected_argument in buttons:
+        update = SimpleNamespace(message=SimpleNamespace(text=text))
+        context = SimpleNamespace(args=["stale-argument"])
+        asyncio.run(bot.handle_text(update, context))
+        assert calls[-1] == (expected_handler, expected_argument)
+
+
+def test_unauthorized_reply_keyboard_press_explains_access_denial(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from src import telegram_bot as bot
+
+    replies = []
+
+    class MessageStub:
+        text = bot.BTN_QUICK_SCAN
+
+        async def reply_text(self, text):
+            replies.append(text)
+
+    monkeypatch.setattr(bot, "get_settings", lambda: Settings(_env_file=None))
+    monkeypatch.setattr(bot, "_is_authorized", lambda *_args: False)
+    asyncio.run(bot.handle_text(SimpleNamespace(message=MessageStub()), SimpleNamespace()))
+
+    assert len(replies) == 1
+    assert "غير مصرح" in replies[0]
+
+
+def test_telegram_error_handler_reports_failed_button_instead_of_silent_failure():
+    import asyncio
+    from types import SimpleNamespace
+
+    from src import telegram_bot as bot
+
+    replies = []
+
+    class MessageStub:
+        async def reply_text(self, text):
+            replies.append(text)
+
+    update = SimpleNamespace(effective_message=MessageStub())
+    context = SimpleNamespace(error=RuntimeError("private error detail"))
+    asyncio.run(bot.handle_telegram_error(update, context))
+
+    assert len(replies) == 1
+    assert "تعذر تنفيذ هذا الزر" in replies[0]
+    assert "private error detail" not in replies[0]
