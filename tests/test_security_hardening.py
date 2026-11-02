@@ -474,3 +474,35 @@ def test_valid_inline_callback_routes_return_their_expected_result(
     asyncio.run(bot.handle_callback_query(update, None))
 
     assert any(expected_reply in reply for reply in replies)
+
+
+@pytest.mark.parametrize("command_name", ["cmd_scan", "cmd_status", "cmd_watchlist", "cmd_add", "cmd_remove"])
+def test_unauthorized_commands_explain_denial_instead_of_silently_returning(
+    monkeypatch, command_name
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from src import telegram_bot as bot
+
+    replies = []
+
+    class MessageStub:
+        async def reply_text(self, text, **kwargs):
+            replies.append(text)
+
+    message = MessageStub()
+    update = SimpleNamespace(
+        effective_chat=SimpleNamespace(id=456, type="private"),
+        effective_user=SimpleNamespace(id=456),
+        message=message,
+    )
+    context = SimpleNamespace(args=[])
+    settings = Settings(_env_file=None, telegram_allowed_user_id="789")
+    monkeypatch.setattr(bot, "get_settings", lambda: settings)
+
+    asyncio.run(getattr(bot, command_name)(update, context))
+
+    assert len(replies) == 1
+    assert "غير مخوّل" in replies[0]
+    assert "TELEGRAM_ALLOWED_USER_ID" in replies[0]

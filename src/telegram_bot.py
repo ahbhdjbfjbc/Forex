@@ -554,9 +554,24 @@ async def _reply_target(update: Update):
     return None
 
 
+async def _require_authorized(
+    update: Update, settings: Settings, msg_target=None
+) -> bool:
+    """Authorize a command and explain denial instead of silently ignoring it."""
+    if _is_authorized(update, settings):
+        return True
+    logger.warning("denying Telegram command from unauthorized sender")
+    target = msg_target or await _reply_target(update)
+    if target is not None:
+        await target.reply_text(
+            "⛔ وصل الأمر إلى البوت لكن هذا الحساب غير مخوّل. "
+            "تحقق من TELEGRAM_ALLOWED_USER_ID أو افتح محادثة البوت الخاصة المسموح بها."
+        )
+    return False
+
+
 async def _handle_scan_request(update: Update, settings: Settings, raw_text: str) -> None:
-    if not _is_authorized(update, settings):
-        logger.warning("ignoring on-demand scan request from unauthorized Telegram sender")
+    if not await _require_authorized(update, settings):
         return
     msg_target = await _reply_target(update)
     if not msg_target:
@@ -607,7 +622,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     msg_target = await _reply_target(update)
-    if not _is_authorized(update, settings) or not msg_target:
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
         return
     raw_text = " ".join(context.args) if getattr(context, "args", None) else ""
     if not raw_text:
@@ -623,7 +638,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_scan_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     msg_target = await _reply_target(update)
-    if not _is_authorized(update, settings) or not msg_target:
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
         return
     wait_msg = await msg_target.reply_text(
         "🚀 جاري إجراء فحص شامل لجميع الأزواج في قائمة المراقبة... يرجى الانتظار لحظات."
@@ -639,7 +654,7 @@ async def cmd_scan_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     msg_target = await _reply_target(update)
-    if not _is_authorized(update, settings) or not msg_target:
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
         return
     symbols = watchlist_store.get_all()
     if not symbols:
@@ -661,7 +676,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     msg_target = await _reply_target(update)
-    if not _is_authorized(update, settings) or not msg_target:
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
         return
     raw = " ".join(context.args) if getattr(context, "args", None) else ""
     if not raw:
@@ -692,7 +707,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     msg_target = await _reply_target(update)
-    if not _is_authorized(update, settings) or not msg_target:
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
         return
     raw = " ".join(context.args) if getattr(context, "args", None) else ""
     if not raw:
@@ -738,7 +753,7 @@ def _format_paper_status(settings: Settings) -> str:
 async def cmd_paper_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     msg_target = await _reply_target(update)
-    if not _is_authorized(update, settings) or not msg_target:
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
         return
     report = await asyncio.to_thread(_format_paper_status, settings)
     await msg_target.reply_text(report)
@@ -748,7 +763,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     """يعرض حالة البوت والإعدادات الحالية وحالة الحساب التجريبي."""
     settings = get_settings()
     msg_target = await _reply_target(update)
-    if not _is_authorized(update, settings) or not msg_target:
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
         return
     symbols = watchlist_store.get_all()
     channel_status = (
@@ -784,7 +799,7 @@ async def cmd_channel_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """يرسل رسالة اختبارية للقناة للتأكد من صلاحيات البوت."""
     settings = get_settings()
     msg_target = await _reply_target(update)
-    if not _is_authorized(update, settings) or not msg_target:
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
         return
     test_msg = (
         "✅ رسالة اختبار من بوت توصيات الفوركس\n"
@@ -872,7 +887,7 @@ def run_evolution(strategy_name: str, symbol: str, timeframe: str, settings: Set
 async def cmd_evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     msg_target = await _reply_target(update)
-    if not _is_authorized(update, settings) or not msg_target:
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
         return
 
     args = getattr(context, "args", None) or []
@@ -928,7 +943,7 @@ async def cmd_evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_apply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     msg_target = await _reply_target(update)
-    if not _is_authorized(update, settings) or not msg_target:
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
         return
 
     args = getattr(context, "args", None) or []
@@ -1151,7 +1166,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
-    if not _is_authorized(update, settings) or not update.message:
+    if not update.message or not await _require_authorized(update, settings, update.message):
         return
     await update.message.reply_text(
         f"⚠️ أمر غير معروف: {update.message.text}\n\n{_USAGE}",

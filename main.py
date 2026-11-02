@@ -260,7 +260,10 @@ async def _run_webhook_and_telegram(settings: Settings) -> None:
         )
         logger.info("Telegram on-demand bot polling started")
     else:
-        logger.info("TELEGRAM_BOT_TOKEN not set — on-demand Telegram bot disabled")
+        logger.warning(
+            "TELEGRAM_BOT_TOKEN not set — Telegram command bot is disabled; "
+            "set it in the deployment environment to start polling"
+        )
 
     try:
         await server.serve()

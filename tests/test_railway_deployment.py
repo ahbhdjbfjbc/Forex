@@ -283,3 +283,32 @@ def test_no_signal_alerts_are_opt_in_to_avoid_repetitive_notifications(monkeypat
 
     app.run_scan_cycle(Settings(_env_file=None, notify_no_signals=True))
     assert sent == [True]
+
+
+
+def test_missing_telegram_token_warns_but_keeps_webhook_service_running(monkeypatch, caplog) -> None:
+    import logging
+    import main as app
+
+    served = []
+
+    class FakeServer:
+        def __init__(self, _config):
+            pass
+
+        async def serve(self):
+            served.append(True)
+
+    monkeypatch.setattr(app.uvicorn, "Config", lambda *args, **kwargs: object())
+    monkeypatch.setattr(app.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(
+        app, "build_telegram_application",
+        lambda _settings: pytest.fail("Telegram polling must stay disabled without a token"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="main"):
+        asyncio.run(app._run_webhook_and_telegram(Settings(_env_file=None)))
+
+    assert served == [True]
+    assert "TELEGRAM_BOT_TOKEN not set" in caplog.text
+    assert "Telegram command bot is disabled" in caplog.text
