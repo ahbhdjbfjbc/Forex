@@ -1,10 +1,28 @@
 """Regression tests for TradingView webhook security and risk math."""
 from types import SimpleNamespace
+import time
 
+import pandas as pd
 import pytest
 
 from src import tradingview_bridge as bridge
 from src.models import TradingViewAlert
+
+
+def _fresh_bar_time():
+    return int(time.time() * 1000)
+
+
+def _mock_corroboration(alert):
+    if alert.signal == "NONE":
+        signal = None
+    else:
+        signal = bridge._alert_to_signal(alert)
+    frame = pd.DataFrame(
+        {"Open": [alert.price], "High": [alert.price], "Low": [alert.price], "Close": [alert.price], "Volume": [1]},
+        index=pd.DatetimeIndex([pd.Timestamp.now(tz="UTC")]),
+    )
+    return signal, None, frame
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +34,7 @@ def safe_settings(monkeypatch):
         min_risk_reward=2.0,
     )
     monkeypatch.setattr(bridge, "get_settings", lambda: settings)
+    monkeypatch.setattr(bridge, "_corroborate_alert", _mock_corroboration)
     bridge._RECENT_ALERTS.clear()
     with bridge._ALERT_DEDUPE_LOCK:
         bridge._SEEN_ALERTS.clear()
@@ -108,7 +127,8 @@ def test_webhook_rejects_wrong_side_stop_without_storing_alert(monkeypatch):
     client = TestClient(bridge.app)
     response = client.post("/webhook/tradingview", json={
         "ticker": "XAUUSD", "timeframe": "15", "signal": "BUY", "price": 4300,
-        "stop_loss": 4310, "secret": "test-secret-which-is-longer-than-32-chars",
+        "stop_loss": 4310, "bar_time": _fresh_bar_time(),
+        "secret": "test-secret-which-is-longer-than-32-chars",
     })
     assert response.status_code == 422
     assert len(bridge._RECENT_ALERTS) == 0
@@ -122,6 +142,7 @@ def test_webhook_returns_multistatus_when_no_channel_reports_delivery(monkeypatc
     client = TestClient(bridge.app)
     response = client.post("/webhook/tradingview", json={
         "ticker": "EURUSD", "timeframe": "15", "signal": "BUY", "price": 1.085,
+        "bar_time": _fresh_bar_time(),
         "secret": "test-secret-which-is-longer-than-32-chars",
     })
     assert response.status_code == 503
@@ -137,6 +158,7 @@ def test_webhook_reports_success_when_a_channel_reports_delivery(monkeypatch):
     client = TestClient(bridge.app)
     response = client.post("/webhook/tradingview", json={
         "ticker": "EURUSD", "timeframe": "15", "signal": "BUY", "price": 1.085,
+        "bar_time": _fresh_bar_time(),
         "secret": "test-secret-which-is-longer-than-32-chars",
     })
     assert response.status_code == 200
@@ -152,6 +174,7 @@ def test_webhook_rejects_exact_short_window_replay(monkeypatch):
     client = TestClient(bridge.app)
     payload = {
         "ticker": "EURUSD", "timeframe": "15", "signal": "BUY", "price": 1.085,
+        "bar_time": _fresh_bar_time(),
         "secret": "test-secret-which-is-longer-than-32-chars",
     }
     first = client.post("/webhook/tradingview", json=payload)
@@ -166,7 +189,7 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
     from fastapi.testclient import TestClient
 
     from config import Settings
-    from src import notifier
+    from src import charting, notifier
     from src.signal_lifecycle import SignalLifecycleStore
 
     lifecycle = SignalLifecycleStore(tmp_path / "signal-state.sqlite3")
@@ -176,14 +199,31 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
     monkeypatch.setattr(notifier, "signal_lifecycle", lifecycle)
     monkeypatch.setattr(notifier, "get_settings", lambda: settings)
     monkeypatch.setattr(bridge, "send_alert", notifier.send_alert)
+    chart_dir = tmp_path / "charts"
+    chart_dir.mkdir()
+
+    def fake_chart(_signal, _frame, signal_id):
+        image_path = chart_dir / f"{signal_id}.png"
+        source_path = chart_dir / f"{signal_id}.json"
+        image_path.write_bytes(b"chart")
+        source_path.write_text("{}", encoding="utf-8")
+        return charting.ChartAssets(image_path, source_path)
+
+    monkeypatch.setattr(charting, "create_signal_chart", fake_chart)
     monkeypatch.setattr(
         notifier,
         "dispatch_message",
         lambda message, _settings=None: messages.append(message) or {"telegram": True},
     )
+    monkeypatch.setattr(
+        notifier,
+        "dispatch_signal",
+        lambda message, _image, _settings=None: messages.append(message) or {"telegram": True},
+    )
     client = TestClient(bridge.app)
     base = {
         "ticker": "EURUSD", "timeframe": "15", "signal": "BUY",
+        "bar_time": _fresh_bar_time(),
         "secret": "test-secret-which-is-longer-than-32-chars",
     }
 
@@ -199,13 +239,15 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
     assert len(messages) == 2
     assert "توصية تداول احترافية جديدة" in messages[0]
     assert "نتيجة التوصية" in messages[1]
-    assert "تحقق الهدف الثاني" in messages[1]
+    assert "تحقق الهدف" in messages[1]
 
     reset = client.post(
         "/webhook/tradingview",
-        json={**base, "signal": "NONE", "price": 1.093},
+        json={**base, "signal": "NONE", "price": 1.093, "bar_time": _fresh_bar_time()},
     )
-    next_setup = client.post("/webhook/tradingview", json={**base, "price": 1.094})
+    next_setup = client.post(
+        "/webhook/tradingview", json={**base, "price": 1.094, "bar_time": _fresh_bar_time()}
+    )
     assert reset.json()["status"] == "reset"
     assert next_setup.json()["status"] == "ok"
     assert len(messages) == 3

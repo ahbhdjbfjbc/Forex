@@ -16,7 +16,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -67,13 +69,58 @@ def _validate(df: pd.DataFrame, request: OHLCVRequest) -> pd.DataFrame:
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise DataFetchError(f"missing columns {missing} for {request.symbol}")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise DataFetchError(f"OHLCV index is not datetime for {request.symbol}/{request.timeframe}")
+    df = df.copy()
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    for column in REQUIRED_COLUMNS:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    if df.empty:
+        raise DataFetchError(f"OHLCV has no complete price bars for {request.symbol}/{request.timeframe}")
+    prices = df[["Open", "High", "Low", "Close"]].to_numpy(dtype=float)
+    if not bool(np.isfinite(prices).all()):
+        raise DataFetchError(f"OHLCV contains non-finite prices for {request.symbol}/{request.timeframe}")
+    invalid_range = (
+        (df["High"] < df[["Open", "Close", "Low"]].max(axis=1))
+        | (df["Low"] > df[["Open", "Close", "High"]].min(axis=1))
+        | (df[["Open", "High", "Low", "Close"]] <= 0).any(axis=1)
+        | (df["Volume"] < 0)
+    )
+    if bool(invalid_range.any()):
+        raise DataFetchError(f"OHLCV contains impossible bars for {request.symbol}/{request.timeframe}")
     if len(df) < request.min_bars:
         raise DataFetchError(
             f"insufficient bars for {request.symbol}/{request.timeframe}: "
             f"got {len(df)}, need {request.min_bars}"
         )
     return df
+
+
+_MAX_BAR_AGE = {
+    "15m": timedelta(minutes=90),
+    "30m": timedelta(hours=3),
+    "1h": timedelta(hours=6),
+    "4h": timedelta(hours=18),
+    "1d": timedelta(days=3),
+}
+
+
+def _ensure_fresh(df: pd.DataFrame, request: OHLCVRequest, now: datetime | None = None) -> None:
+    """Reject stale/future live bars before they can drive recommendations."""
+    if request.timeframe not in _MAX_BAR_AGE:
+        raise DataFetchError(f"no freshness policy for timeframe {request.timeframe!r}")
+    latest = pd.Timestamp(df.index[-1])
+    if latest.tzinfo is None:
+        latest = latest.tz_localize("UTC")
+    else:
+        latest = latest.tz_convert("UTC")
+    current = now or datetime.now(timezone.utc)
+    age = current - latest.to_pydatetime()
+    if age < timedelta(minutes=-5):
+        raise DataFetchError(f"latest bar is in the future for {request.symbol}/{request.timeframe}")
+    if age > _MAX_BAR_AGE[request.timeframe]:
+        raise DataFetchError(f"latest bar is stale for {request.symbol}/{request.timeframe}")
 
 
 def fetch_ohlcv_yfinance(
@@ -127,9 +174,24 @@ def fetch_ohlcv(request: OHLCVRequest) -> pd.DataFrame | None:
     """Public entry point Scanner 1 should call. Wraps provider selection +
     error containment so a bad symbol never raises out of a scan loop."""
     try:
-        return fetch_ohlcv_yfinance(request)
+        from config import get_settings
+
+        provider = str(get_settings().data_provider).strip().lower()
+        if provider != "yfinance":
+            logger.error("unsupported OHLCV provider %r; no recommendations will be produced", provider)
+            return None
+        frame = fetch_ohlcv_yfinance(request)
+        if frame is None:
+            return None
+        _ensure_fresh(frame, request)
+        return frame
     except DataFetchError as exc:
         logger.warning("data validation failed for %s/%s: %s", request.symbol, request.timeframe, exc)
+        return None
+    except Exception as exc:
+        # Includes a missing optional SDK or unexpected provider failure; one
+        # dependency problem must never escape into the watchlist scan loop.
+        logger.warning("OHLCV fetch unavailable for %s/%s (%s)", request.symbol, request.timeframe, type(exc).__name__)
         return None
 
 

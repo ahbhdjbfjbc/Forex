@@ -105,7 +105,9 @@ def test_private_control_panel_works_when_alerts_target_a_basic_group():
         "effective_chat": type("ChatStub", (), {"id": 456, "type": "private"})(),
         "effective_user": type("UserStub", (), {"id": 456})(),
     })()
-    settings = Settings(_env_file=None, telegram_chat_id="-12345")
+    settings = Settings(
+        _env_file=None, telegram_chat_id="-12345", telegram_allowed_user_id="456"
+    )
     assert _is_authorized(update, settings) is True
 
 
@@ -225,13 +227,13 @@ def test_publish_callback_reports_actual_telegram_delivery(
     assert expected_text in replies[0]
 
 
-def test_private_chat_still_works_without_extra_user_setting():
+def test_private_chat_is_denied_without_numeric_admin_user_id():
     update = type("UpdateStub", (), {
         "effective_chat": type("ChatStub", (), {"id": 123, "type": "private"})(),
         "effective_user": type("UserStub", (), {"id": 123})(),
     })()
     settings = Settings(_env_file=None, telegram_chat_id="123")
-    assert _is_authorized(update, settings) is True
+    assert _is_authorized(update, settings) is False
 
 
 def test_discord_http_error_does_not_log_webhook_credential(monkeypatch, caplog):
@@ -506,3 +508,31 @@ def test_unauthorized_commands_explain_denial_instead_of_silently_returning(
     assert len(replies) == 1
     assert "غير مخوّل" in replies[0]
     assert "TELEGRAM_ALLOWED_USER_ID" in replies[0]
+
+
+def test_numeric_owner_id_is_required_and_mismatched_user_is_denied():
+    from config import Settings
+    from src.telegram_bot import _is_authorized
+
+    def update(user_id, chat_type="private"):
+        return type("UpdateStub", (), {
+            "effective_chat": type("ChatStub", (), {"id": 123, "type": chat_type})(),
+            "effective_user": type("UserStub", (), {"id": user_id})(),
+        })()
+
+    settings = Settings(_env_file=None, telegram_chat_id="123", telegram_allowed_user_id="456")
+    assert _is_authorized(update(123), settings) is False
+    assert _is_authorized(update(456), settings) is True
+    assert _is_authorized(update(456, "group"), settings) is True
+
+
+def test_non_numeric_admin_configuration_fails_closed():
+    from config import Settings
+    from src.telegram_bot import _is_authorized
+
+    update = type("UpdateStub", (), {
+        "effective_chat": type("ChatStub", (), {"id": 123, "type": "private"})(),
+        "effective_user": type("UserStub", (), {"id": 123})(),
+    })()
+    settings = Settings(_env_file=None, telegram_allowed_user_id="@owner")
+    assert _is_authorized(update, settings) is False

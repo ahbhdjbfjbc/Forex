@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import logging
 import platform
 import subprocess
+from pathlib import Path
 
 import httpx
 
@@ -42,6 +43,7 @@ STRATEGY_LABELS = {
     StrategyType.TREND_PULLBACK: "ارتداد مع الاتجاه (ملامسة EMA 20)",
     StrategyType.MEAN_REVERSION_FADE: "ارتداد للوسط السعري (BB + RSI)",
     StrategyType.VOLATILITY_BREAKOUT: "اختراق سعري (Donchian/Keltner)",
+    StrategyType.EXTERNAL_ALERT: "تنبيه خارجي من TradingView (غير مصنف باستراتيجية داخلية)",
     StrategyType.NO_TRADE: "لا توجد صفقة",
 }
 
@@ -53,7 +55,7 @@ def format_pair(symbol: str) -> str:
     return clean
 
 
-def format_message(signal: TradeSignal) -> str:
+def format_message(signal: TradeSignal, market_frame=None) -> str:
     regime_label = REGIME_LABELS.get(signal.regime, signal.regime.value)
     strategy_label = STRATEGY_LABELS.get(signal.strategy, signal.strategy.value)
     direction_emoji = DIRECTION_EMOJI.get(signal.direction, "")
@@ -62,12 +64,8 @@ def format_message(signal: TradeSignal) -> str:
 
     if instrument_type(signal.symbol) == "FX":
         sl_text = f"🛑 وقف الخسارة: {signal.stop_loss_price} (-{signal.stop_loss_pips:g} نقطة)"
-        tp1_text = (
-            f"🎯 الهدف الأول: {signal.take_profit_1_price} "
-            f"(+{signal.take_profit_1_pips:g} نقطة | العائد 1:{signal.take_profit_1_rr:g})"
-        )
-        tp2_text = (
-            f"🎯 الهدف الثاني: {signal.take_profit_2_price} "
+        target_text = (
+            f"🎯 الهدف الوحيد: {signal.take_profit_2_price} "
             f"(+{signal.take_profit_2_pips:g} نقطة | العائد 1:{signal.take_profit_2_rr:g})"
         )
         size_text = f"💼 حجم العقد المقترح: {signal.risk.lot_size:g} لوت قياسي"
@@ -82,15 +80,21 @@ def format_message(signal: TradeSignal) -> str:
             else "وحدة"
         )
         sl_text = f"🛑 وقف الخسارة: {signal.stop_loss_price} (مسافة سعرية {signal.stop_loss_pips:g})"
-        tp1_text = (
-            f"🎯 الهدف الأول: {signal.take_profit_1_price} "
-            f"(مسافة سعرية {signal.take_profit_1_pips:g} | العائد 1:{signal.take_profit_1_rr:g})"
-        )
-        tp2_text = (
-            f"🎯 الهدف الثاني: {signal.take_profit_2_price} "
+        target_text = (
+            f"🎯 الهدف الوحيد: {signal.take_profit_2_price} "
             f"(مسافة سعرية {signal.take_profit_2_pips:g} | العائد 1:{signal.take_profit_2_rr:g})"
         )
         size_text = f"💼 الحجم التقريبي: {signal.risk.lot_size:g} {unit} (قد يختلف حجم العقد حسب الوسيط)"
+
+    context_lines = []
+    if market_frame is not None and len(market_frame) > 1:
+        prior = market_frame.iloc[:-1].tail(50)
+        if not prior.empty:
+            support = float(prior["Low"].min())
+            resistance = float(prior["High"].max())
+            context_lines.append(f"📐 دعم/مقاومة سابقة: {support:g} / {resistance:g}")
+    if signal.symbol.upper() == "XAUUSD":
+        context_lines.append("⚠️ مصدر الذهب: GC=F (عقود COMEX الآجلة)، وليس سعراً فورياً XAUUSD")
 
     lines = [
         "🚨 توصية تداول احترافية جديدة 🚨",
@@ -98,11 +102,16 @@ def format_message(signal: TradeSignal) -> str:
         f"📈 نوع الصفقة: {direction_label} {direction_emoji}",
         f"📊 حالة السوق: {regime_label} ({tf_label})",
         f"🧠 الاستراتيجية: {strategy_label}",
+        *(
+            [f"🧮 تقييم شروط الفرصة: {signal.quality_score}/100 ({signal.quality_grade}) — ليس نسبة نجاح"]
+            if signal.quality_score is not None and signal.quality_grade
+            else []
+        ),
         "------------------------------",
         f"🔹 سعر الدخول: {signal.entry_price}",
         sl_text,
-        tp1_text,
-        tp2_text,
+        target_text,
+        *context_lines,
         f"{size_text} (إدارة المخاطر: {signal.risk.risk_percent:g}% من رصيد ${signal.risk.account_size_usd:,.0f})",
         "------------------------------",
         f"🕒 الوقت: {signal.timestamp.strftime('%Y-%m-%d %H:%M:%S')} بتوقيت UTC",
@@ -135,6 +144,64 @@ def send_telegram(message: str, settings: Settings) -> bool:
         return True
     except httpx.HTTPError as exc:
         logger.error("telegram send failed (%s)", type(exc).__name__)
+        return False
+
+
+def send_telegram_photo(caption: str, image_path: str | Path, settings: Settings) -> bool:
+    """Send the recommendation and its chart in one Telegram sendPhoto call."""
+    target_chat_id = _get_target_telegram_id(settings)
+    path = Path(image_path)
+    if not settings.telegram_bot_token or not target_chat_id or not path.is_file():
+        logger.warning("telegram photo delivery unavailable (configuration or chart missing)")
+        return False
+    if path.stat().st_size > 8 * 1024 * 1024:
+        logger.warning("telegram photo rejected because chart exceeds the configured size limit")
+        return False
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendPhoto"
+    try:
+        with path.open("rb") as image_file:
+            response = httpx.post(
+                url,
+                data={"chat_id": target_chat_id, "caption": caption[:1024]},
+                files={"photo": (path.name, image_file, "image/png")},
+                timeout=20.0,
+            )
+        if response.status_code == 429:
+            logger.warning("telegram photo send rate-limited")
+            return False
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            logger.warning("telegram API did not acknowledge photo delivery")
+            return False
+        return True
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        logger.error("telegram photo send failed (%s)", type(exc).__name__)
+        return False
+
+
+def send_admin_message(message: str, settings: Settings) -> bool:
+    """Send an administrative report only to the configured numeric user ID."""
+    admin_id = str(getattr(settings, "telegram_allowed_user_id", "") or "").strip()
+    if not admin_id.isdecimal() or not settings.telegram_bot_token:
+        logger.warning("private admin message unavailable (admin ID or bot token missing)")
+        return False
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    try:
+        response = httpx.post(
+            url,
+            json={"chat_id": admin_id, "text": str(message)[:4096]},
+            timeout=15.0,
+            follow_redirects=False,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            logger.warning("telegram API did not acknowledge private admin report")
+            return False
+        return True
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        logger.error("private admin report failed (%s)", type(exc).__name__)
         return False
 
 
@@ -196,22 +263,56 @@ def dispatch_message(message: str, settings: Settings | None = None) -> dict[str
     return results
 
 
+def dispatch_signal(message: str, image_path: str | Path, settings: Settings | None = None) -> dict[str, bool]:
+    """Send a chart+caption to Telegram, and text to optional other channels."""
+    settings = settings or get_settings()
+    results: dict[str, bool] = {}
+    try:
+        results["telegram"] = bool(send_telegram_photo(message, image_path, settings))
+    except Exception as exc:
+        logger.error("telegram photo notification failed (%s)", type(exc).__name__)
+        results["telegram"] = False
+    for name, dispatcher in (("discord", send_discord), ("desktop", send_desktop)):
+        try:
+            results[name] = bool(dispatcher(message, settings))
+        except Exception as exc:
+            logger.error("%s notification failed (%s)", name, type(exc).__name__)
+            results[name] = False
+    return results
+
+
 def format_signal_outcome(outcome: SignalOutcome) -> str:
     """Format one terminal price outcome without implying broker execution."""
     result_labels = {
-        "TAKE_PROFIT_2": "تحقق الهدف الثاني",
+        "TAKE_PROFIT_2": "تحقق الهدف",
         "STOP_LOSS": "تحقق وقف الخسارة",
-        "AMBIGUOUS_STOP_FIRST": "لامست الشمعة الوقف والهدف معاً؛ احتُسب الوقف تحفظياً لأن ترتيب اللمس غير معروف",
+        "AMBIGUOUS": "نتيجة ملتبسة؛ لامست الشمعة الوقف والهدف ولا يمكن معرفة أيهما تحقق أولاً",
         "REVERSED": "أُغلقت التوصية عند ظهور إشارة معاكسة",
     }
-    tp1_note = "\nℹ️ سبق تسجيل لمس الهدف الأول." if outcome.tp1_reached else ""
+    seconds = max(0, int(outcome.duration_seconds))
+    days, remainder = divmod(seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, _ = divmod(remainder, 60)
+    duration = " ".join(
+        part for value, part in ((days, "يوم"), (hours, "ساعة"), (minutes, "دقيقة"))
+        if value
+    ) or "أقل من دقيقة"
+    exit_label = f"{outcome.exit_price:g}" if outcome.exit_price is not None else "غير قابل للتحديد من OHLCV"
+    points_label = (
+        f"{outcome.points:+g} {outcome.points_unit} | المحصلة النظرية: {outcome.r_multiple:+g}R"
+        if outcome.points is not None and outcome.r_multiple is not None
+        else "غير محسوبة (ترتيب لمس المستويات مجهول)"
+    )
     return (
-        "📊 نتيجة التوصية (متابعة سعرية تقديرية من OHLCV، وليست إثبات تنفيذ لدى وسيط)\n"
-        f"📌 {format_pair(outcome.symbol)} — {outcome.timeframe.upper()} — {outcome.direction}\n"
-        f"📍 الدخول: {outcome.entry_price:g} | الخروج المحتسب: {outcome.exit_price:g}\n"
+        "📊 نتيجة التوصية (تقدير من شموع OHLCV؛ ليست إثبات تنفيذ لدى وسيط)\n"
+        f"📌 {format_pair(outcome.symbol)} — {outcome.timeframe.upper()} — {outcome.direction} — {outcome.strategy}\n"
+        f"📍 الدخول: {outcome.entry_price:g} | وقف الخسارة: {outcome.stop_loss_price:g} | الهدف: {outcome.target_price:g}\n"
+        f"🚪 سعر الإغلاق: {exit_label}\n"
         f"🏁 النتيجة: {result_labels.get(outcome.outcome, outcome.outcome)}\n"
-        f"📐 المحصلة النظرية: {outcome.r_multiple:+g}R{tp1_note}\n"
-        f"🕒 الإغلاق: {outcome.closed_at} UTC\n"
+        f"📐 الحركة السعرية: {points_label}\n"
+        f"⏱️ مدة التوصية: {duration}\n"
+        f"🕒 وقت التحقق: {outcome.closed_at} UTC | المصدر: {outcome.source}\n"
+        "ℹ️ مصدر OHLCV لا يوفر Bid/Ask؛ السبريد والانزلاق غير محتسبين، والنتيجة تقديرية.\n"
         f"🆔 رقم التوصية: {outcome.signal_id}"
     )
 
@@ -238,12 +339,17 @@ def send_alert(
     *,
     source: str = "unknown",
     entry_bar_id: str | None = None,
+    market_frame=None,
 ) -> dict[str, bool]:
     """Publish a new active idea once; duplicates stay silent until setup reset or exit."""
     settings = settings or get_settings()
     if not isinstance(signal, TradeSignal):
         # Retain the simple formatter/dispatcher contract for adapters and tests.
         return dispatch_message(format_message(signal), settings)
+
+    if market_frame is None:
+        logger.warning("refusing to publish %s/%s without its analyzed OHLCV frame", signal.symbol, signal.timeframe)
+        return {"telegram": False, "discord": False, "desktop": False, "duplicate": False}
 
     flush_pending_signal_outcomes(settings)
     tick_outcome = signal_lifecycle.observe_price(
@@ -264,8 +370,21 @@ def send_alert(
         )
         return {"telegram": False, "discord": False, "desktop": False, "duplicate": True}
 
-    message = format_message(signal)
-    results = dispatch_message(message, settings)
+    try:
+        from src.charting import create_signal_chart
+
+        chart_assets = create_signal_chart(signal, market_frame, registration.signal_id)
+        if not signal_lifecycle.set_chart_assets(
+            registration.signal_id, chart_assets.image_path, chart_assets.source_path
+        ):
+            raise RuntimeError("signal chart references could not be persisted")
+    except Exception as exc:
+        signal_lifecycle.cancel_signal(registration.signal_id)
+        logger.error("refusing to publish signal without a valid chart (%s)", type(exc).__name__)
+        return {"telegram": False, "discord": False, "desktop": False, "duplicate": False}
+
+    message = format_message(signal, market_frame)
+    results = dispatch_signal(message, chart_assets.image_path, settings)
     if not any(results.values()):
         signal_lifecycle.cancel_signal(registration.signal_id)
     if not any(results.values()):

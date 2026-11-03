@@ -14,6 +14,8 @@ import threading
 from uuid import uuid4
 
 from src.storage import get_data_dir
+from src.risk import pip_size
+from src.symbol_resolver import instrument_type
 
 
 @dataclass(frozen=True)
@@ -23,11 +25,19 @@ class SignalOutcome:
     timeframe: str
     direction: str
     entry_price: float
-    exit_price: float
+    exit_price: float | None
     outcome: str
-    r_multiple: float
+    r_multiple: float | None
     tp1_reached: bool
     closed_at: str
+    strategy: str
+    stop_loss_price: float
+    target_price: float
+    source: str
+    points: float | None
+    points_unit: str
+    duration_seconds: int
+    opened_at: str
 
 
 @dataclass(frozen=True)
@@ -79,6 +89,22 @@ def normalize_bar_id(value) -> str | None:
     return str(int(parsed.timestamp() * 1000))
 
 
+def _parse_bar_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        if text.isdigit():
+            parsed = datetime.fromtimestamp(int(text) / 1000.0, tz=timezone.utc)
+        else:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 class SignalLifecycleStore:
     """SQLite-backed active-signal registry and one-shot outcome outbox."""
 
@@ -110,7 +136,13 @@ class SignalLifecycleStore:
                     outcome TEXT,
                     exit_price REAL,
                     closed_at TEXT,
-                    result_sent INTEGER NOT NULL DEFAULT 0
+                    result_sent INTEGER NOT NULL DEFAULT 0,
+                    chart_path TEXT,
+                    source_data_path TEXT,
+                    opened_at TEXT,
+                    close_bar_id TEXT,
+                    quality_score INTEGER,
+                    quality_grade TEXT
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS one_active_signal_per_market
                     ON signals(market_key) WHERE status = 'ACTIVE';
@@ -132,6 +164,28 @@ class SignalLifecycleStore:
                 )
             if "last_evaluated_bar" not in columns:
                 connection.execute("ALTER TABLE signals ADD COLUMN last_evaluated_bar TEXT")
+            if "chart_path" not in columns:
+                connection.execute("ALTER TABLE signals ADD COLUMN chart_path TEXT")
+            if "source_data_path" not in columns:
+                connection.execute("ALTER TABLE signals ADD COLUMN source_data_path TEXT")
+            if "opened_at" not in columns:
+                connection.execute("ALTER TABLE signals ADD COLUMN opened_at TEXT")
+            if "close_bar_id" not in columns:
+                connection.execute("ALTER TABLE signals ADD COLUMN close_bar_id TEXT")
+            if "quality_score" not in columns:
+                connection.execute("ALTER TABLE signals ADD COLUMN quality_score INTEGER")
+            if "quality_grade" not in columns:
+                connection.execute("ALTER TABLE signals ADD COLUMN quality_grade TEXT")
+
+    def set_chart_assets(self, signal_id: str, image_path: str, source_data_path: str) -> bool:
+        """Persist local chart/source references before any recommendation is sent."""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE signals SET chart_path=?, source_data_path=?
+                   WHERE signal_id=? AND status='ACTIVE'""",
+                (str(image_path), str(source_data_path), signal_id),
+            )
+            return cursor.rowcount == 1
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30.0)
@@ -147,10 +201,23 @@ class SignalLifecycleStore:
     def _outcome_from_row(row: sqlite3.Row) -> SignalOutcome:
         direction = str(row["direction"])
         entry = float(row["entry_price"])
-        exit_price = float(row["exit_price"])
-        risk = abs(entry - float(row["stop_loss"]))
+        exit_price = float(row["exit_price"]) if row["exit_price"] is not None else None
+        symbol = str(row["symbol"])
         sign = 1.0 if direction == "BUY" else -1.0
-        r_multiple = sign * (exit_price - entry) / risk if risk else 0.0
+        if exit_price is not None:
+            risk = abs(entry - float(row["stop_loss"]))
+            r_multiple = sign * (exit_price - entry) / risk if risk else 0.0
+            signed_move = sign * (exit_price - entry)
+        else:
+            r_multiple = None
+            signed_move = None
+        if instrument_type(symbol) == "FX":
+            points, points_unit = (signed_move / pip_size(symbol) if signed_move is not None else None), "pips"
+        else:
+            points, points_unit = signed_move, "price units"
+        entry_time = _parse_bar_datetime(row["entry_bar_id"]) or _parse_bar_datetime(row["opened_at"])
+        exit_time = _parse_bar_datetime(row["close_bar_id"]) or _parse_bar_datetime(row["closed_at"])
+        duration = max(0, int((exit_time - entry_time).total_seconds())) if entry_time and exit_time else 0
         return SignalOutcome(
             signal_id=str(row["signal_id"]),
             symbol=str(row["symbol"]),
@@ -159,9 +226,17 @@ class SignalLifecycleStore:
             entry_price=entry,
             exit_price=exit_price,
             outcome=str(row["outcome"]),
-            r_multiple=round(r_multiple, 2),
+            r_multiple=round(r_multiple, 2) if r_multiple is not None else None,
             tp1_reached=bool(row["tp1_reached"]),
             closed_at=str(row["closed_at"]),
+            strategy=str(row["strategy"]),
+            stop_loss_price=float(row["stop_loss"]),
+            target_price=float(row["take_profit_2"]),
+            source=str(row["source"]),
+            points=round(points, 1 if points_unit == "pips" else 5) if points is not None else None,
+            points_unit=points_unit,
+            duration_seconds=duration,
+            opened_at=str(row["opened_at"] or ""),
         )
 
     def _close(
@@ -169,13 +244,16 @@ class SignalLifecycleStore:
         connection: sqlite3.Connection,
         row: sqlite3.Row,
         reason: str,
-        exit_price: float,
+        exit_price: float | None,
+        bar_id: str | None = None,
     ) -> SignalOutcome:
-        closed_at = datetime.now(timezone.utc).isoformat()
+        bar_id = normalize_bar_id(bar_id)
+        close_time = _parse_bar_datetime(bar_id)
+        closed_at = (close_time or datetime.now(timezone.utc)).isoformat()
         connection.execute(
-            """UPDATE signals SET status='CLOSED', outcome=?, exit_price=?, closed_at=?
+            """UPDATE signals SET status='CLOSED', outcome=?, exit_price=?, closed_at=?, close_bar_id=?
                WHERE signal_id=? AND status='ACTIVE'""",
-            (reason, float(exit_price), closed_at, row["signal_id"]),
+            (reason, float(exit_price) if exit_price is not None else None, closed_at, bar_id, row["signal_id"]),
         )
         if not row["setup_reset"]:
             connection.execute(
@@ -209,7 +287,9 @@ class SignalLifecycleStore:
                 if active["direction"] == direction:
                     connection.rollback()
                     return SignalRegistration(accepted=False, duplicate=True)
-                closed_outcome = self._close(connection, active, "REVERSED", float(signal.entry_price))
+                closed_outcome = self._close(
+                    connection, active, "REVERSED", float(signal.entry_price), bar_id=entry_bar_id
+                )
 
             blocked = connection.execute(
                 "SELECT direction FROM blocked_setups WHERE market_key=?", (key,)
@@ -228,13 +308,16 @@ class SignalLifecycleStore:
                     """INSERT INTO signals(
                         signal_id, market_key, symbol, timeframe, direction, strategy,
                         entry_price, stop_loss, take_profit_1, take_profit_2,
-                        entry_bar_id, last_evaluated_bar, source, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')""",
+                        entry_bar_id, last_evaluated_bar, source, status, opened_at,
+                        quality_score, quality_grade
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)""",
                     (
                         signal_id, key, symbol, timeframe, direction, strategy,
                         float(signal.entry_price), float(signal.stop_loss_price),
                         float(signal.take_profit_1_price), float(signal.take_profit_2_price),
                         entry_bar_id, entry_bar_id, source,
+                        getattr(signal, "timestamp", datetime.now(timezone.utc)).isoformat(),
+                        getattr(signal, "quality_score", None), getattr(signal, "quality_grade", None),
                     ),
                 )
             except sqlite3.IntegrityError:
@@ -284,13 +367,13 @@ class SignalLifecycleStore:
                 tp2_hit = low <= tp2
 
             if stop_hit and (tp1_hit or tp2_hit):
-                # OHLC bars do not reveal which level was touched first; count
-                # the stop first so the bot never reports an unproven win.
-                return self._close(connection, row, "AMBIGUOUS_STOP_FIRST", stop)
+                # OHLC bars do not reveal level order. Close as ambiguous and
+                # store no exit/P&L rather than inventing a win or a loss.
+                return self._close(connection, row, "AMBIGUOUS", None, bar_id)
             if stop_hit:
-                return self._close(connection, row, "STOP_LOSS", stop)
+                return self._close(connection, row, "STOP_LOSS", stop, bar_id)
             if tp2_hit:
-                return self._close(connection, row, "TAKE_PROFIT_2", tp2)
+                return self._close(connection, row, "TAKE_PROFIT_2", tp2, bar_id)
             if tp1_hit and not row["tp1_reached"]:
                 connection.execute(
                     "UPDATE signals SET tp1_reached=1 WHERE signal_id=? AND status='ACTIVE'",
@@ -367,6 +450,31 @@ class SignalLifecycleStore:
                 "SELECT DISTINCT symbol FROM signals WHERE status='ACTIVE' ORDER BY symbol"
             ).fetchall()
         return [str(row["symbol"]) for row in rows]
+
+    def closed_history(self, limit: int = 500) -> list[dict]:
+        """Return closed recommendation snapshots for local performance analysis."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 10_000:
+            raise ValueError("history limit must be between 1 and 10000")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT signal_id, symbol, timeframe, direction, strategy, source,
+                          entry_price, stop_loss, take_profit_1, take_profit_2,
+                          exit_price, outcome, closed_at, opened_at, tp1_reached,
+                          quality_score, quality_grade, chart_path, source_data_path
+                   FROM signals WHERE status='CLOSED' ORDER BY closed_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        history = []
+        for row in rows:
+            item = dict(row)
+            risk = abs(float(item["entry_price"]) - float(item["stop_loss"]))
+            sign = 1.0 if item["direction"] == "BUY" else -1.0
+            item["r_multiple"] = (
+                sign * (float(item["exit_price"]) - float(item["entry_price"])) / risk
+                if risk and item["exit_price"] is not None else None
+            )
+            history.append(item)
+        return history
 
     def pending_outcomes(self) -> list[SignalOutcome]:
         with self._connect() as connection:

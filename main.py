@@ -50,12 +50,8 @@ from src.signal_lifecycle import normalize_symbol, signal_lifecycle
 from src.telegram_bot import build_telegram_application, publish_telegram_command_menu
 from src.tradingview_bridge import app as webhook_app
 from src.watchlist_store import watchlist_store
-
-# استيراد آمن لفلتر الأخبار حتى لا يتعطل المشروع أبداً حتى لو لم يتم إنشاء ملف الأخبار بعد
-try:
-    from src.news_filter import check_news_status
-except ImportError:
-    check_news_status = None
+from src.news_filter import NewsStatus, check_news_status
+from src.system_health import report_health
 
 logger = logging.getLogger(__name__)
 
@@ -97,14 +93,22 @@ def monitor_news_state(settings: Settings | None = None) -> bool:
     global _is_paused_for_news, _scan_deferred_by_news
     settings = settings or get_settings()
 
-    if check_news_status is None:
-        return False
-
     try:
         news_status = check_news_status(settings)
     except Exception:
-        logger.exception("news filter check failed; continuing normal operation")
-        return False
+        logger.exception("news filter check failed; pausing recommendations until data recovers")
+        news_status = NewsStatus(
+            is_paused=True,
+            details="تعذر التحقق من تقويم الأخبار؛ تم إيقاف التوصيات مؤقتاً احترازياً.",
+            data_available=False,
+        )
+
+    report_health(
+        "economic_calendar",
+        bool(news_status.data_available),
+        news_status.details,
+        settings,
+    )
 
     should_run_deferred_scan = False
 
@@ -152,7 +156,29 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
         len(symbols), len(settings.timeframe_list),
     )
 
-    regime_data = scan_symbols_with_data(symbols, settings)
+    try:
+        regime_data = scan_symbols_with_data(symbols, settings)
+    except Exception as exc:
+        logger.exception("market scan failed; no recommendation will be emitted in this cycle")
+        report_health(
+            "market_data", False,
+            f"فشل جلب/تحليل بيانات السوق ({type(exc).__name__})؛ أُوقف هذا المسح.",
+            settings,
+        )
+        return
+
+    expected_pairs = {
+        (normalize_symbol(symbol), timeframe.lower())
+        for symbol in symbols
+        for timeframe in settings.timeframe_list
+    }
+    received_pairs = {
+        (normalize_symbol(getattr(result, "symbol", "")), str(getattr(result, "timeframe", "")).lower())
+        for result, _frame in regime_data
+    }
+    market_healthy = bool(regime_data) and expected_pairs.issubset(received_pairs)
+    coverage = f"بيانات حديثة متاحة لـ {len(received_pairs & expected_pairs)}/{len(expected_pairs)} زوج/إطار."
+    report_health("market_data", market_healthy, coverage, settings)
     signals_sent = 0
     suppressed_low_confidence = 0
 
@@ -192,7 +218,7 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
             )
             continue
         delivery = send_alert(
-            signal, settings, source="auto-scan", entry_bar_id=bar_id
+            signal, settings, source="auto-scan", entry_bar_id=bar_id, market_frame=df
         )
         if delivery.get("duplicate"):
             continue
@@ -207,6 +233,14 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
         signals_sent, suppressed_low_confidence,
     )
     flush_pending_signal_outcomes(settings)
+
+    if settings.ai_review_enabled:
+        try:
+            from src.ai_assistant import maybe_send_periodic_report
+
+            maybe_send_periodic_report(settings)
+        except Exception as exc:
+            logger.error("optional AI review scheduler failed (%s)", type(exc).__name__)
 
     # إرسال تنبيه في حال وجود تذبذب وعدم توفر توصيات جيدة خلال هذه الساعة
     if signals_sent == 0 and len(regime_data) > 0 and getattr(settings, "notify_no_signals", False):

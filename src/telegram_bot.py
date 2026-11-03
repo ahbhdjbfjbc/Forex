@@ -45,6 +45,7 @@ except ImportError as exc:
 
 import strategy_evolver as evolver
 from config import Settings, get_settings
+from src.admin_audit import record_admin_action
 from src import indicators as ind
 from src import oanda_client
 from src.models import MarketRegime, RegimeResult
@@ -319,12 +320,8 @@ def _format_found_report(
 
     if kind == "FX":
         sl_line = f"🛑 وقف الخسارة: {signal.stop_loss_price} (-{signal.stop_loss_pips:g} نقطة)"
-        tp1_line = (
-            f"🎯 الهدف الأول: {signal.take_profit_1_price} "
-            f"(+{signal.take_profit_1_pips:g} نقطة | العائد 1:{signal.take_profit_1_rr:g})"
-        )
-        tp2_line = (
-            f"🎯 الهدف الثاني: {signal.take_profit_2_price} "
+        target_line = (
+            f"🎯 الهدف الوحيد: {signal.take_profit_2_price} "
             f"(+{signal.take_profit_2_pips:g} نقطة | العائد 1:{signal.take_profit_2_rr:g})"
         )
         size_line = (
@@ -342,12 +339,8 @@ def _format_found_report(
             else "وحدة"
         )
         sl_line = f"🛑 وقف الخسارة: {signal.stop_loss_price} (-{signal.stop_loss_pips:g})"
-        tp1_line = (
-            f"🎯 الهدف الأول: {signal.take_profit_1_price} "
-            f"(+{signal.take_profit_1_pips:g} | العائد 1:{signal.take_profit_1_rr:g})"
-        )
-        tp2_line = (
-            f"🎯 الهدف الثاني: {signal.take_profit_2_price} "
+        target_line = (
+            f"🎯 الهدف الوحيد: {signal.take_profit_2_price} "
             f"(+{signal.take_profit_2_pips:g} | العائد 1:{signal.take_profit_2_rr:g})"
         )
         size_line = (
@@ -361,13 +354,22 @@ def _format_found_report(
             "----------------------------------",
             f"🔍 حالة السوق: {regime_label} ({tf_tag})",
             f"⚡ الاستراتيجية المطابقة: {strategy_label}",
-            f"🎖️ درجة الدقة والثقة: {confidence_pct}%",
+            f"📐 مطابقة قواعد النظام: {confidence_pct}% — ليست نسبة نجاح تاريخية",
+            *(
+                [f"🧮 تقييم شروط الفرصة: {signal.quality_score}/100 ({signal.quality_grade}) — ليس نسبة نجاح"]
+                if signal.quality_score is not None and signal.quality_grade
+                else []
+            ),
             f"🎯 التوصية: دخول صفقة {direction_label} {direction_emoji}",
             "",
             f"📈 سعر الدخول: {signal.entry_price}",
             sl_line,
-            tp1_line,
-            tp2_line,
+            target_line,
+            *(
+                [f"⚠️ مصدر الذهب: GC=F (عقود COMEX الآجلة)، وليس سعراً فورياً XAUUSD"]
+                if symbol.upper() == "XAUUSD"
+                else []
+            ),
             size_line,
             "----------------------------------",
             f"💡 المؤشرات الفنية: ADX = {regime_result.metrics.adx:.1f} | "
@@ -472,7 +474,8 @@ def run_full_watchlist_scan(settings: Settings | None = None) -> str:
             dir_label = DIRECTION_LABELS.get(signal.direction, signal.direction.value)
             conf_pct = int(round(regime_result.confidence * 100))
             delivery = send_alert(
-                signal, settings, source="telegram-scan-all", entry_bar_id=str(df.index[-1])
+                signal, settings, source="telegram-scan-all", entry_bar_id=str(df.index[-1]),
+                market_frame=df,
             )
             if delivery.get("duplicate"):
                 state = "لديها توصية نشطة بالفعل؛ لم تُكرر الرسالة"
@@ -481,7 +484,8 @@ def run_full_watchlist_scan(settings: Settings | None = None) -> str:
             else:
                 state = "تعذر إرسالها؛ تحقق من إعدادات قنوات الإشعار"
             found_signals.append(
-                f"✅ {pair_str}: {dir_label} {dir_emoji} (الدقة: {conf_pct}%) — {state}"
+                f"✅ {pair_str}: {dir_label} {dir_emoji} (مطابقة القواعد: {conf_pct}%، تقييم الشروط: "
+                f"{signal.quality_score}/100) — {state}"
             )
         else:
             signal_lifecycle.reset_block(regime_result.symbol, regime_result.timeframe)
@@ -512,35 +516,20 @@ def run_full_watchlist_scan(settings: Settings | None = None) -> str:
 
 
 def _is_authorized(update: Update, settings: Settings) -> bool:
-    """Authorize private users, but require an explicit user allowlist in groups."""
-    chat = update.effective_chat
-    if chat is None:
-        return False
-
+    """Fail closed: every interactive/admin action requires the numeric owner ID."""
     allowed_user_id = str(getattr(settings, "telegram_allowed_user_id", "") or "").strip()
     user = update.effective_user
-    configured_chat = str(settings.telegram_chat_id or "").strip()
+    chat = update.effective_chat
+    if not allowed_user_id.isdecimal() or user is None or chat is None:
+        return False
+    if str(user.id) != allowed_user_id:
+        return False
     chat_type = getattr(chat, "type", "private")
-    user_is_allowed = bool(
-        allowed_user_id and user is not None and str(user.id) == allowed_user_id
-    )
-
     if chat_type == "private":
-        if allowed_user_id and not user_is_allowed:
-            return False
-        # A numeric positive ID is a configured private chat. Channel/group IDs
-        # (negative) and @channel names must not block the owner's private UI.
-        if configured_chat.isdigit() and not user_is_allowed:
-            return str(chat.id) == configured_chat
         return True
-
     if chat_type in {"group", "supergroup"}:
-        return bool(
-            configured_chat
-            and str(chat.id) == configured_chat
-            and user_is_allowed
-        )
-
+        configured_chat = str(settings.telegram_chat_id or "").strip()
+        return bool(configured_chat and str(chat.id) == configured_chat)
     return False
 
 
@@ -558,14 +547,26 @@ async def _require_authorized(
     update: Update, settings: Settings, msg_target=None
 ) -> bool:
     """Authorize a command and explain denial instead of silently ignoring it."""
+    user = getattr(update, "effective_user", None)
+    query = getattr(update, "callback_query", None)
+    message = getattr(update, "message", None)
+    raw_action = getattr(message, "text", "") if message is not None else ""
+    if query is not None:
+        raw_action = "callback:" + str(getattr(query, "data", "")).split(":", 1)[0]
+    elif isinstance(raw_action, str) and raw_action.startswith("/"):
+        raw_action = raw_action.split(maxsplit=1)[0].split("@", 1)[0]
+    else:
+        raw_action = "text"
     if _is_authorized(update, settings):
+        record_admin_action(getattr(user, "id", None), raw_action, "authorized")
         return True
+    record_admin_action(getattr(user, "id", None), raw_action, "denied")
     logger.warning("denying Telegram command from unauthorized sender")
     target = msg_target or await _reply_target(update)
     if target is not None:
         await target.reply_text(
             "⛔ وصل الأمر إلى البوت لكن هذا الحساب غير مخوّل. "
-            "تحقق من TELEGRAM_ALLOWED_USER_ID أو افتح محادثة البوت الخاصة المسموح بها."
+            "يلزم ضبط TELEGRAM_ALLOWED_USER_ID على رقم حساب المالك المصرّح به."
         )
     return False
 
@@ -605,13 +606,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = get_settings()
     msg_target = await _reply_target(update)
     if not _is_authorized(update, settings):
+        record_admin_action(
+            getattr(getattr(update, "effective_user", None), "id", None), "/start", "denied"
+        )
         logger.warning("denying /start from an unauthorized Telegram sender")
         if msg_target:
             await msg_target.reply_text(
-                "⛔ لا تملك صلاحية استخدام لوحة البوت. تحقق من "
-                "TELEGRAM_ALLOWED_USER_ID أو افتح محادثة البوت الخاصة المسموح بها."
+                "⛔ لا تملك صلاحية استخدام لوحة البوت. يلزم ضبط "
+                "TELEGRAM_ALLOWED_USER_ID على رقم حساب المالك المصرّح به."
             )
         return
+    record_admin_action(
+        getattr(getattr(update, "effective_user", None), "id", None), "/start", "authorized"
+    )
     if msg_target:
         await msg_target.reply_text(
             f"✅ بوت توصيات الفوركس الاحترافي متصل ويعمل بنجاح!\n\n{_USAGE}",
@@ -687,6 +694,10 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     resolved = _resolve_input_symbol(raw) or raw
     symbol, was_new = watchlist_store.add(resolved)
+    record_admin_action(
+        getattr(getattr(update, "effective_user", None), "id", None),
+        "/add", "failed" if symbol is None else "succeeded",
+    )
     if symbol is None:
         await msg_target.reply_text(
             f"⚠️ الرمز '{raw}' غير صالح.\nاختر من القائمة التالية:",
@@ -718,6 +729,10 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     resolved = _resolve_input_symbol(raw) or raw
     symbol, was_removed = watchlist_store.remove(resolved)
+    record_admin_action(
+        getattr(getattr(update, "effective_user", None), "id", None),
+        "/remove", "failed" if symbol is None else "succeeded",
+    )
     if symbol is None:
         await msg_target.reply_text(f"⚠️ الرمز '{raw}' غير صالح.")
     elif was_removed:
@@ -822,6 +837,8 @@ def _format_evolution_report(
     strategy_name: str, symbol: str, timeframe: str, candidate, tested_count: int
 ) -> str:
     r = candidate.result
+    oos = candidate.out_of_sample_result
+    baseline_oos = candidate.baseline_out_of_sample_result
     baseline = asdict(get_strategy_params(strategy_name))
     change_lines = [f"{key}: {baseline.get(key)} -> {new_val}" for key, new_val in candidate.param_overrides.items()]
     changes_text = "; ".join(change_lines) if change_lines else "لا توجد تغييرات عن الإعدادات الافتراضية"
@@ -831,13 +848,14 @@ def _format_evolution_report(
 
     if candidate.passed:
         status_line = (
-            f"✅ النتيجة: اجتاز معايير القبول بنجاح!\n"
+            f"✅ النتيجة: اجتاز التدريب والاختبار خارج العينة ({oos.total_trades} صفقة OOS) "
+            f"وتفوق على خط الأساس ({baseline_oos.avg_realized_r:+g}R متوسطاً).\n"
             f"لتطبيق هذه الإعدادات أرسل الأمر: /apply {candidate.proposal_id}"
         )
     else:
         status_line = (
-            f"❌ النتيجة: لم يجتز معايير الأمان الصارمة (يتطلب Sharpe>{evolver.ACCEPTANCE_MIN_SHARPE}, "
-            f"PF>{evolver.ACCEPTANCE_MIN_PROFIT_FACTOR}, وأقصى تراجع أقل من {evolver.ACCEPTANCE_MAX_DRAWDOWN_PCT}%) — لم يتم التطبيق."
+            f"❌ النتيجة: لم يجتز حواجز التدريب/OOS (يلزم {evolver.MIN_OUT_OF_SAMPLE_TRADES} صفقة OOS، "
+            "المعايير الإحصائية، وتفوق متوسط R على خط الأساس) — لم يتم التطبيق."
         )
 
     return "\n".join(
@@ -847,13 +865,13 @@ def _format_evolution_report(
             f"🧠 الاستراتيجية: {evolver.STRATEGY_DISPLAY_LABELS.get(strategy_name, strategy_name)}",
             f"📌 الزوج: {display_pair(symbol)} ({timeframe.upper()})",
             "",
-            f"📊 أفضل نتيجة من بين ({tested_count}) اختبار "
-            f"(من {r.start.date()} إلى {r.end.date()}):",
-            f"• نسبة النجاح (Win Rate): {r.win_rate_pct:.1f}%",
-            f"• معامل الربح (Profit Factor): {pf_display}",
-            f"• نسبة شارب (Sharpe Ratio): {r.sharpe_ratio:.2f}",
-            f"• أقصى تراجع (Max Drawdown): -{r.max_drawdown_pct:.1f}%",
-            f"• إجمالي الصفقات المختبرة: {r.total_trades}",
+            f"📚 مقاييس التدريب للمرشح المختار من ({tested_count}) إعداد (من {r.start.date()} إلى {r.end.date()}):",
+            f"• Win Rate: {r.win_rate_pct:.1f}% | PF: {pf_display} | Sharpe: {r.sharpe_ratio:.2f}",
+            f"• التراجع الأقصى: -{r.max_drawdown_pct:.1f}% | الصفقات: {r.total_trades}",
+            f"🧪 الاختبار خارج العينة ({oos.start.date()} إلى {oos.end.date()}): "
+            f"{oos.total_trades} صفقة، متوسط {oos.avg_realized_r:+g}R، Sharpe {oos.sharpe_ratio:.2f}",
+            f"🔎 خط الأساس الحالي في OOS: {baseline_oos.total_trades} صفقة، "
+            f"متوسط {baseline_oos.avg_realized_r:+g}R — ترتيب المرشحين يعتمد على التدريب فقط.",
             "",
             status_line,
             "----------------------------------",
@@ -958,6 +976,10 @@ async def cmd_apply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     applied = await asyncio.to_thread(evolver.apply_proposal, proposal_id)
+    record_admin_action(
+        getattr(getattr(update, "effective_user", None), "id", None),
+        "/apply", "succeeded" if applied else "failed",
+    )
     if applied:
         await msg_target.reply_text(
             f"✅ تم تطبيق المقترح {proposal_id} بنجاح على استراتيجية "
@@ -978,8 +1000,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if not _is_authorized(update, settings):
+        record_admin_action(
+            getattr(getattr(update, "effective_user", None), "id", None),
+            "callback:" + str(getattr(query, "data", "")).split(":", 1)[0],
+            "denied",
+        )
         await query.answer("⚠️ غير مصرح لك باستخدام هذه اللوحة.", show_alert=True)
         return
+    record_admin_action(
+        getattr(getattr(update, "effective_user", None), "id", None),
+        "callback:" + str(getattr(query, "data", "")).split(":", 1)[0],
+        "authorized",
+    )
 
     if not query.data:
         await query.answer("⚠️ بيانات الزر غير صالحة. افتح /menu من جديد.", show_alert=True)
@@ -1025,6 +1057,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     settings,
                     source="telegram-publish",
                     entry_bar_id=str(df.index[-1]),
+                    market_frame=df,
                 )
                 if delivery.get("duplicate"):
                     await msg_target.reply_text(

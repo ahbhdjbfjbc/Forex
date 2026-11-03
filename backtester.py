@@ -139,6 +139,7 @@ def run_backtest(
     settings: Settings | None = None,
     param_overrides: dict[str, dict[str, Any]] | None = None,
     lookback_months: int | None = 6,
+    ohlcv_frame: pd.DataFrame | None = None,
 ) -> BacktestResult | None:
     """Walk-forward backtest of `symbol`/`timeframe` over roughly the last
     `lookback_months` (None = use however much history the data provider
@@ -148,9 +149,12 @@ def run_backtest(
     see `strategy_evolver.py`.
     """
     settings = settings or get_settings()
-    fetch_ticker = to_yfinance_ticker(symbol)
-    request = OHLCVRequest(symbol=fetch_ticker, timeframe=timeframe)
-    df = fetch_ohlcv(request)
+    if ohlcv_frame is None:
+        fetch_ticker = to_yfinance_ticker(symbol)
+        request = OHLCVRequest(symbol=fetch_ticker, timeframe=timeframe)
+        df = fetch_ohlcv(request)
+    else:
+        df = ohlcv_frame.copy()
     if df is None:
         logger.warning("backtest: no data available for %s/%s", symbol, timeframe)
         return None

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -342,7 +342,21 @@ class TestStrategyEvolver:
         (proposals_dir / f"{proposal_id}.json").write_text(json.dumps({
             "proposal_id": proposal_id, "strategy_name": "trend_pullback",
             "param_overrides": {"rsi_bullish_ceiling": 62.0}, "passed": True,
-            "metrics": {}, "created_at": "2024-01-01T00:00:00+00:00",
+            "metrics": {
+                "training": {"sharpe_ratio": 1.7, "profit_factor": 1.5, "max_drawdown_pct": 8.0},
+                "out_of_sample": {"total_trades": 20, "avg_realized_r": 0.5, "sharpe_ratio": 1.6,
+                                  "profit_factor": 1.4, "max_drawdown_pct": 10.0},
+                "baseline_out_of_sample": {"total_trades": 25, "avg_realized_r": 0.2},
+            },
+            "validation": {
+                "method": "chronological-70-30", "training_passed": True,
+                "out_of_sample_passed": True, "out_of_sample_trades": 20,
+                "candidate_out_of_sample_avg_r": 0.5, "baseline_out_of_sample_avg_r": 0.2,
+                "training_end": "2024-05-31T00:00:00+00:00",
+                "out_of_sample_start": "2024-06-01T00:00:00+00:00",
+            },
+            "strategy_version": se._strategy_version("trend_pullback", params_path),
+            "created_at": "2024-01-01T00:00:00+00:00",
             "symbol": "EURUSD", "timeframe": "1h",
         }))
 
@@ -350,6 +364,7 @@ class TestStrategyEvolver:
         updated = get_strategy_params("trend_pullback", path=params_path)
         assert updated.rsi_bullish_ceiling == 62.0
         assert list(backups_dir.glob("*.json"))  # a backup was written
+        assert se.apply_proposal(proposal_id, params_path=params_path) is False
 
     def test_apply_nonexistent_proposal_returns_false(self, monkeypatch, tmp_path):
         import strategy_evolver as se
@@ -494,7 +509,17 @@ class TestTelegramEvolveReport:
         return se.EvolutionCandidate(
             proposal_id=proposal_id, strategy_name="trend_pullback", symbol="EURUSD", timeframe="1h",
             param_overrides={"rsi_oversold": 25.0, "atr_sl_multiplier": 1.2},
-            result=result, passed=passed, created_at=datetime.now(timezone.utc),
+            result=result, out_of_sample_result=result,
+            baseline_out_of_sample_result=replace(result, avg_realized_r=0.1),
+            validation={
+                "method": "chronological-70-30", "training_passed": True,
+                "out_of_sample_passed": True, "out_of_sample_trades": 142,
+                "candidate_out_of_sample_avg_r": 0.44, "baseline_out_of_sample_avg_r": 0.1,
+                "training_end": "2024-05-31T00:00:00+00:00",
+                "out_of_sample_start": "2024-06-01T00:00:00+00:00",
+            },
+            strategy_version=se._strategy_version("trend_pullback"),
+            passed=passed, created_at=datetime.now(timezone.utc),
         )
 
     def test_passed_report_tells_user_to_apply(self, tmp_path):
@@ -502,10 +527,10 @@ class TestTelegramEvolveReport:
 
         candidate = self._fake_candidate(passed=True)
         report = _format_evolution_report("trend_pullback", "EURUSD", "1h", candidate, tested_count=9)
-        assert "اجتاز معايير القبول بنجاح" in report
+        assert "اجتاز التدريب والاختبار خارج العينة" in report
         assert "/apply abc123" in report
-        assert "نسبة النجاح (Win Rate): 64.2%" in report
-        assert "نسبة شارب (Sharpe Ratio): 1.71" in report
+        assert "Win Rate: 64.2%" in report
+        assert "Sharpe: 1.71" in report
         assert "تم التطبيق" not in report  # applying is a separate explicit command
 
     def test_failed_report_does_not_offer_apply(self, tmp_path):
@@ -513,7 +538,7 @@ class TestTelegramEvolveReport:
 
         candidate = self._fake_candidate(passed=False)
         report = _format_evolution_report("trend_pullback", "EURUSD", "1h", candidate, tested_count=9)
-        assert "لم يجتز معايير الأمان الصارمة" in report
+        assert "لم يجتز حواجز التدريب/OOS" in report
         assert "/apply" not in report
 
     def test_run_evolution_no_candidates_reports_insufficient_data(self, monkeypatch, settings):

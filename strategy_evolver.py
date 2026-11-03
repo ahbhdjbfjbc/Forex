@@ -21,6 +21,8 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib
 import itertools
 import json
 import logging
@@ -32,10 +34,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import backtester
+import pandas as pd
 from config import Settings, get_settings
-from backtester import BacktestResult, run_backtest
+from backtester import BacktestResult, MIN_WARMUP_BARS, run_backtest
 from src.strategy_params import DEFAULT_PARAMS_PATH, PARAM_CLASSES, get_strategy_params, save_strategy_params
 from src.storage import get_data_dir
+from src.symbol_resolver import to_yfinance_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,8 @@ BACKUPS_DIR = get_data_dir() / "strategy_params_backups"
 ACCEPTANCE_MIN_SHARPE = 1.5
 ACCEPTANCE_MIN_PROFIT_FACTOR = 1.3
 ACCEPTANCE_MAX_DRAWDOWN_PCT = 12.0
+MIN_OUT_OF_SAMPLE_TRADES = 20
+TRAIN_FRACTION = 0.70
 
 # Sensible default search grids per strategy, used by the Telegram /evolve
 # command (typing a raw JSON grid into a chat message is error-prone) and
@@ -81,6 +88,10 @@ class EvolutionCandidate:
     timeframe: str
     param_overrides: dict[str, Any]
     result: BacktestResult
+    out_of_sample_result: BacktestResult
+    baseline_out_of_sample_result: BacktestResult
+    validation: dict[str, Any]
+    strategy_version: dict[str, str]
     passed: bool
     created_at: datetime
 
@@ -94,6 +105,21 @@ def _grid(param_grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
     return [dict(zip(keys, combo)) for combo in itertools.product(*param_grid.values())]
 
 
+def _strategy_version(strategy_name: str, params_path: Path | None = None) -> dict[str, str]:
+    """Fingerprint the source file and baseline parameter set used by a proposal."""
+    if strategy_name not in PARAM_CLASSES:
+        raise ValueError(f"unknown strategy {strategy_name!r}")
+    strategy_module = importlib.import_module(PARAM_CLASSES[strategy_name].__module__)
+    source_path = Path(strategy_module.__file__)
+    source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    params = asdict(get_strategy_params(strategy_name, path=params_path or DEFAULT_PARAMS_PATH))
+    params_bytes = json.dumps(params, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "source_sha256": source_hash,
+        "baseline_params_sha256": hashlib.sha256(params_bytes).hexdigest(),
+    }
+
+
 def evolve_strategy(
     strategy_name: str,
     symbol: str,
@@ -102,47 +128,123 @@ def evolve_strategy(
     settings: Settings | None = None,
     lookback_months: int | None = 6,
 ) -> list[EvolutionCandidate]:
-    """Backtests every combination in `param_grid` (merged over the current
-    baseline params for `strategy_name`), saves each as a proposal, and
-    returns all candidates sorted best-Sharpe-first. Writes proposal files
-    only — never touches `data/strategy_params.json`."""
+    """Train on the earlier 70%, validate on a later 30%, and save proposals only.
+
+    The OOS window is never used to rank candidates. Applying still requires a
+    separate explicit admin action and a passing baseline comparison.
+    """
     if strategy_name not in PARAM_CLASSES:
         raise ValueError(f"unknown strategy {strategy_name!r}; known: {sorted(PARAM_CLASSES)}")
 
     settings = settings or get_settings()
     candidates: list[EvolutionCandidate] = []
+    strategy_version = _strategy_version(strategy_name)
+    request = backtester.OHLCVRequest(
+        symbol=to_yfinance_ticker(symbol), timeframe=timeframe
+    )
+    market_frame = backtester.fetch_ohlcv(request)
+    if market_frame is None or market_frame.empty:
+        logger.warning("no market data for chronological strategy evaluation")
+        return []
+    if lookback_months is not None:
+        cutoff = market_frame.index[-1] - pd.DateOffset(months=lookback_months)
+        start_index = max(0, int(market_frame.index.searchsorted(cutoff)) - MIN_WARMUP_BARS)
+        market_frame = market_frame.iloc[start_index:]
+
+    split = int(len(market_frame) * TRAIN_FRACTION)
+    if split <= MIN_WARMUP_BARS or len(market_frame) - split < 30:
+        logger.warning(
+            "insufficient bars for chronological OOS evaluation (%d bars; need warm-up and holdout)",
+            len(market_frame),
+        )
+        return []
+    training_frame = market_frame.iloc[:split]
+    # Keep only past bars needed for indicator warm-up; the first evaluated
+    # bar of this slice is exactly the holdout boundary.
+    test_frame = market_frame.iloc[split - MIN_WARMUP_BARS:]
+    baseline_oos = run_backtest(
+        symbol, timeframe, settings, lookback_months=None, ohlcv_frame=test_frame
+    )
+    if baseline_oos is None:
+        logger.warning("baseline returned no result on the OOS period; refusing proposals")
+        return []
 
     for overrides in _grid(param_grid):
+        train_result = run_backtest(
+            symbol, timeframe, settings,
+            param_overrides={strategy_name: overrides},
+            lookback_months=None, ohlcv_frame=training_frame,
+        )
         result = run_backtest(
             symbol, timeframe, settings,
             param_overrides={strategy_name: overrides},
-            lookback_months=lookback_months,
+            lookback_months=None, ohlcv_frame=test_frame,
         )
-        if result is None:
+        if train_result is None or result is None:
             logger.warning("skipping candidate %s: backtest returned no result", overrides)
             continue
 
-        passed = result.passes_acceptance_criteria(
+        train_passed = train_result.passes_acceptance_criteria(
             ACCEPTANCE_MIN_SHARPE, ACCEPTANCE_MIN_PROFIT_FACTOR, ACCEPTANCE_MAX_DRAWDOWN_PCT
         )
+        oos_passed = (
+            result.total_trades >= MIN_OUT_OF_SAMPLE_TRADES
+            and result.passes_acceptance_criteria(
+                ACCEPTANCE_MIN_SHARPE, ACCEPTANCE_MIN_PROFIT_FACTOR, ACCEPTANCE_MAX_DRAWDOWN_PCT
+            )
+            and result.avg_realized_r > baseline_oos.avg_realized_r
+        )
+        validation = {
+            "method": "chronological-70-30",
+            "training_start": training_frame.index[0].isoformat(),
+            "training_end": training_frame.index[-1].isoformat(),
+            "out_of_sample_start": market_frame.index[split].isoformat(),
+            "out_of_sample_end": market_frame.index[-1].isoformat(),
+            "minimum_out_of_sample_trades": MIN_OUT_OF_SAMPLE_TRADES,
+            "out_of_sample_trades": result.total_trades,
+            "baseline_out_of_sample_trades": baseline_oos.total_trades,
+            "candidate_out_of_sample_avg_r": result.avg_realized_r,
+            "baseline_out_of_sample_avg_r": baseline_oos.avg_realized_r,
+            "training_passed": train_passed,
+            "out_of_sample_passed": oos_passed,
+        }
         candidate = EvolutionCandidate(
             proposal_id=uuid4().hex[:8],
             strategy_name=strategy_name,
             symbol=symbol,
             timeframe=timeframe,
             param_overrides=overrides,
-            result=result,
-            passed=passed,
+            result=train_result,
+            out_of_sample_result=result,
+            baseline_out_of_sample_result=baseline_oos,
+            validation=validation,
+            strategy_version=strategy_version,
+            passed=train_passed and oos_passed,
             created_at=datetime.now(timezone.utc),
         )
         candidates.append(candidate)
         _save_proposal(candidate)
 
+    # Rank only by the training slice; never select a candidate based on its
+    # holdout score.
     candidates.sort(key=lambda c: c.result.sharpe_ratio, reverse=True)
     return candidates
 
 
 def _proposal_payload(candidate: EvolutionCandidate) -> dict[str, Any]:
+    def metrics(result: BacktestResult) -> dict[str, Any]:
+        return {
+            "total_trades": result.total_trades,
+            "win_rate_pct": result.win_rate_pct,
+            "profit_factor": result.profit_factor,
+            "sharpe_ratio": result.sharpe_ratio,
+            "max_drawdown_pct": result.max_drawdown_pct,
+            "avg_realized_r": result.avg_realized_r,
+            "start": result.start.isoformat(),
+            "end": result.end.isoformat(),
+            "bars_tested": result.bars_tested,
+        }
+
     r = candidate.result
     return {
         "proposal_id": candidate.proposal_id,
@@ -153,16 +255,12 @@ def _proposal_payload(candidate: EvolutionCandidate) -> dict[str, Any]:
         "passed": candidate.passed,
         "created_at": candidate.created_at.isoformat(),
         "metrics": {
-            "total_trades": r.total_trades,
-            "win_rate_pct": r.win_rate_pct,
-            "profit_factor": r.profit_factor,
-            "sharpe_ratio": r.sharpe_ratio,
-            "max_drawdown_pct": r.max_drawdown_pct,
-            "avg_realized_r": r.avg_realized_r,
-            "start": r.start.isoformat(),
-            "end": r.end.isoformat(),
-            "bars_tested": r.bars_tested,
+            "training": metrics(r),
+            "out_of_sample": metrics(candidate.out_of_sample_result),
+            "baseline_out_of_sample": metrics(candidate.baseline_out_of_sample_result),
         },
+        "validation": candidate.validation,
+        "strategy_version": candidate.strategy_version,
     }
 
 
@@ -194,6 +292,62 @@ def _valid_proposal_overrides(strategy_name: str, overrides: Any) -> bool:
     return True
 
 
+def _valid_oos_validation(proposal: dict[str, Any]) -> bool:
+    validation = proposal.get("validation")
+    metrics = proposal.get("metrics")
+    if not isinstance(validation, dict) or not isinstance(metrics, dict):
+        return False
+    oos = metrics.get("out_of_sample")
+    baseline = metrics.get("baseline_out_of_sample")
+    training = metrics.get("training")
+    version = proposal.get("strategy_version")
+    if (
+        not isinstance(oos, dict) or not isinstance(baseline, dict)
+        or not isinstance(training, dict) or not isinstance(version, dict)
+    ):
+        return False
+    try:
+        trade_count = int(validation["out_of_sample_trades"])
+        candidate_avg = float(validation["candidate_out_of_sample_avg_r"])
+        baseline_avg = float(validation["baseline_out_of_sample_avg_r"])
+        train_sharpe = float(training["sharpe_ratio"])
+        train_pf = float(training["profit_factor"])
+        train_dd = float(training["max_drawdown_pct"])
+        oos_sharpe = float(oos["sharpe_ratio"])
+        oos_pf = float(oos["profit_factor"])
+        oos_dd = float(oos["max_drawdown_pct"])
+        split_valid = (
+            datetime.fromisoformat(validation["training_end"])
+            < datetime.fromisoformat(validation["out_of_sample_start"])
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    hashes_valid = all(
+        isinstance(version.get(key), str)
+        and len(version[key]) == 64
+        and all(char in "0123456789abcdef" for char in version[key])
+        for key in ("source_sha256", "baseline_params_sha256")
+    )
+    return (
+        validation.get("method") == "chronological-70-30"
+        and validation.get("training_passed") is True
+        and validation.get("out_of_sample_passed") is True
+        and trade_count >= MIN_OUT_OF_SAMPLE_TRADES
+        and oos.get("total_trades") == trade_count
+        and candidate_avg > baseline_avg
+        and oos.get("avg_realized_r") == candidate_avg
+        and baseline.get("avg_realized_r") == baseline_avg
+        and train_sharpe > ACCEPTANCE_MIN_SHARPE
+        and train_pf > ACCEPTANCE_MIN_PROFIT_FACTOR
+        and train_dd < ACCEPTANCE_MAX_DRAWDOWN_PCT
+        and oos_sharpe > ACCEPTANCE_MIN_SHARPE
+        and oos_pf > ACCEPTANCE_MIN_PROFIT_FACTOR
+        and oos_dd < ACCEPTANCE_MAX_DRAWDOWN_PCT
+        and hashes_valid
+        and split_valid
+    )
+
+
 def load_proposal(proposal_id: str) -> dict[str, Any] | None:
     # Generated proposals use uuid4().hex[:8]. Validate before constructing a
     # path so Telegram/CLI input cannot escape the proposal directory.
@@ -218,6 +372,9 @@ def load_proposal(proposal_id: str) -> dict[str, Any] | None:
         or not isinstance(proposal.get("created_at"), str)
     ):
         logger.warning("could not load proposal %s (invalid proposal structure)", proposal_id)
+        return None
+    if proposal.get("passed") is True and not _valid_oos_validation(proposal):
+        logger.warning("refusing proposal %s without valid out-of-sample evidence", proposal_id)
         return None
     return proposal
 
@@ -266,6 +423,9 @@ def apply_proposal(proposal_id: str, params_path: Path | None = None) -> bool:
     if strategy_name not in PARAM_CLASSES or not _valid_proposal_overrides(strategy_name, overrides):
         logger.error("refusing to apply proposal %s: invalid strategy parameters", proposal_id)
         return False
+    if proposal.get("strategy_version") != _strategy_version(strategy_name, params_path):
+        logger.error("refusing to apply proposal %s: strategy code or baseline params changed", proposal_id)
+        return False
     cls = PARAM_CLASSES[strategy_name]
     current = get_strategy_params(strategy_name, path=params_path)
     merged = {**asdict(current), **overrides}
@@ -278,13 +438,15 @@ def apply_proposal(proposal_id: str, params_path: Path | None = None) -> bool:
 
 
 def _format_report(candidates: list[EvolutionCandidate]) -> str:
-    lines = [f"{'ID':<10} {'PASS':<6} {'Sharpe':>7} {'PF':>6} {'MaxDD%':>7} {'WinRate%':>9} {'Trades':>7}  Overrides"]
+    lines = [
+        f"{'ID':<10} {'OOS PASS':<9} {'Train Sharpe':>12} {'OOS avg R':>10} "
+        f"{'OOS Trades':>10}  Overrides"
+    ]
     for c in candidates:
-        r = c.result
+        oos = c.out_of_sample_result
         lines.append(
-            f"{c.proposal_id:<10} {'YES' if c.passed else 'no':<6} {r.sharpe_ratio:>7.2f} "
-            f"{r.profit_factor if isinstance(r.profit_factor, float) else 999:>6.2f} {r.max_drawdown_pct:>7.2f} "
-            f"{r.win_rate_pct:>9.2f} {r.total_trades:>7d}  {c.param_overrides}"
+            f"{c.proposal_id:<10} {'YES' if c.passed else 'no':<9} {c.result.sharpe_ratio:>12.2f} "
+            f"{oos.avg_realized_r:>10.3f} {oos.total_trades:>10d}  {c.param_overrides}"
         )
     return "\n".join(lines)
 

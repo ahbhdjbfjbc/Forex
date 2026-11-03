@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
+import pandas as pd
 from fastapi.testclient import TestClient
 
 from config import Settings
@@ -39,9 +41,18 @@ def test_webhook_enforces_per_peer_rate_limit(monkeypatch):
     monkeypatch.setattr(bridge, "send_alert", lambda signal, **_kwargs: {
         "telegram": True, "discord": False, "desktop": False,
     })
+    monkeypatch.setattr(bridge, "_corroborate_alert", lambda alert: (
+        bridge._alert_to_signal(alert),
+        None,
+        pd.DataFrame(
+            {"Open": [alert.price], "High": [alert.price], "Low": [alert.price], "Close": [alert.price], "Volume": [1]},
+            index=pd.DatetimeIndex([pd.Timestamp.now(tz="UTC")]),
+        ),
+    ))
     client = TestClient(bridge.app)
     base = {
         "ticker": "EURUSD", "timeframe": "15", "signal": "BUY",
+        "bar_time": int(time.time() * 1000),
         "secret": "test-secret-which-is-longer-than-32-chars",
     }
     responses = [client.post("/webhook/tradingview", json={**base, "price": p})

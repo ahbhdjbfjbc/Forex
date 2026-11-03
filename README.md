@@ -78,8 +78,10 @@ environment variables, persistent storage, and health-check settings.
   Scanner 2 produces, and forwards it to the notifier.
 
 - **`src/notifier.py`** — formats and sends the trade alert to Telegram,
-  Discord, and/or desktop notification (macOS), whichever are configured
-  in `.env`.
+  including a chart and caption in one Telegram `sendPhoto` request. The PNG
+  and the exact analyzed OHLCV snapshot are retained under `data/charts/` and
+  referenced by the persistent signal record. Discord/desktop remain optional
+  text channels.
 
 - **`src/telegram_bot.py`** — on-demand scanning: message the bot any pair
   or ticker (`EURUSD`, `XAUUSD`, `GBPJPY`, `BTCUSD`, or aliases like `gold`/
@@ -88,11 +90,11 @@ environment variables, persistent storage, and health-check settings.
   setup or a "DO NOT TRADE" with the reason. Every symbol you scan is
   auto-added to the hourly auto-scan watchlist. Also handles `/watchlist`
   (list what's being auto-scanned), `/add <symbol>`, `/remove <symbol>`.
-  Only the chat configured as `TELEGRAM_CHAT_ID` is served. Private chats
-  work without an extra user setting; if commands are used in a group, set
-  `TELEGRAM_ALLOWED_USER_ID` to the one numeric Telegram user ID allowed to
-  issue commands. A group chat alone no longer grants command access to every
-  member. `src/symbol_resolver.py` handles the free-text -> ticker mapping
+  Every command, message, and callback fails closed unless
+  `TELEGRAM_ALLOWED_USER_ID` is set to the owner's numeric Telegram user ID.
+  This applies in private chats and groups; group commands additionally require
+  `TELEGRAM_CHAT_ID` to match that group. A chat ID or username alone never
+  authorizes an admin action. `src/symbol_resolver.py` handles the free-text -> ticker mapping
   (including proxying gold/silver through `GC=F`/`SI=F` futures, since
   Yahoo has no retail XAUUSD ticker).
 
@@ -122,19 +124,32 @@ environment variables, persistent storage, and health-check settings.
   Profit Factor, Sharpe Ratio, Max Drawdown, and realized R-multiple from
   the resulting trades.
 
-- **`strategy_evolver.py`** — a script (not a background loop) that
-  backtests a grid of parameter variants for one strategy, saves each as a
-  proposal under `data/strategy_proposals/`, and only writes to
-  `data/strategy_params.json` — changing what the live bot actually signals
-  — when you explicitly call `apply_proposal(<id>)` on a variant that passed
-  the acceptance criteria (Sharpe > 1.5, Profit Factor > 1.3, Max Drawdown
-  < 12%). Every apply is preceded by a backup in
-  `data/strategy_params_backups/`. Also reachable from Telegram:
-  `/evolve <strategy> <symbol> [timeframe]` runs a built-in parameter grid
-  and reports the best candidate (a "🧪 STRATEGY EVOLUTION REPORT" with Win
-  Rate/Profit Factor/Sharpe/Max Drawdown), and `/apply <proposal_id>`
-  applies it — the report only ever invites you to `/apply`, it never
-  claims a change was made until you actually make that separate call.
+- **`strategy_evolver.py`** — a script (not an autonomous background loop)
+  that evaluates parameter variants on an earlier 70% chronological training
+  window and validates on a later 30% holdout, with the same warm-up bars and
+  live scanner logic. Holdout scores never rank candidates. A proposal passes
+  only with at least 20 OOS trades, training and holdout Sharpe > 1.5, Profit
+  Factor > 1.3, Max Drawdown < 12%, and higher OOS average R than the current
+  baseline. Proposal files include window metrics and hashes for the strategy
+  source and baseline parameters. Parameters change only after a separate
+  explicit `/apply <id>` action; stale or failing proposals are refused, and
+  every apply is preceded by a backup in `data/strategy_params_backups/`.
+  Telegram supports `/evolve <strategy> <symbol> [timeframe]` and `/apply <id>`.
+
+- **`src/ai_assistant.py`** — optional review of closed recommendations.
+  With `AI_REVIEW_ENABLED=true`, the bot sends a rate-limited private report to
+  the configured numeric admin. Local statistics require no model or paid
+  service. Remote review is opt-in and requires `AI_API_BASE_URL`, `AI_API_KEY`,
+  and `AI_MODEL`; only aggregate historical outcomes are sent over HTTPS.
+  Reports record a prompt version and model and are saved under
+  `data/ai_reviews/`. The assistant cannot change parameters; any proposed
+  change must still pass the OOS workflow and be manually approved.
+
+- **`src/system_health.py` / `src/admin_audit.py`** — persist the health state
+  of the market-data and economic-calendar services, privately alert the
+  numeric admin only on failures/recoveries, retry undelivered alerts, and
+  write redacted Telegram command/callback audit events to
+  `data/admin_audit.jsonl` without storing message arguments.
 
 - **`src/ast_patcher.py`** — a secondary, rarely-needed mechanism: surgically
   patches a single literal constant inside a `.py` file (located via `ast`,
@@ -187,10 +202,15 @@ environment variables, persistent storage, and health-check settings.
   recommendations and their one-shot outcome outbox are stored in
   `data/signal_lifecycle.sqlite3` (or `FOREX_DATA_DIR`). Mount persistent storage
   for this directory in production so active recommendations survive redeploys.
-- Signal results are estimated from OHLCV price touches, not broker fills.
-  TP1 is recorded as progress; the recommendation stays open until TP2 or SL.
-  If one candle touches both SL and TP, the bot conservatively records SL first
-  because OHLCV cannot reveal the intrabar order.
+- Signal results are estimates from OHLCV price touches, not broker fills.
+  The Telegram recommendation shows one final target; internal TP1 progress is
+  retained for lifecycle tracking and the recommendation stays open until TP2 or SL.
+  If one live candle touches both SL and TP, the outcome is recorded as
+  `AMBIGUOUS` with no exit price, points, or R-multiple; OHLCV cannot reveal
+  which level came first. The historical backtester uses stop-first only as a
+  conservative simulation assumption. Yahoo Finance OHLCV has no Bid/Ask, so
+  spread and slippage are not included and this limitation is shown in the
+  result message.
 - The backtester's equity curve is realized-P&L-only (marked to market at
   trade close, not intra-trade), and only TP1 is simulated as an exit
   target — see the module docstring in `backtester.py` for the full list of

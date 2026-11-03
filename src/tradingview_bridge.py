@@ -23,8 +23,9 @@ import logging
 import math
 import threading
 import time
+import asyncio
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -41,8 +42,10 @@ from src.models import (
     WebhookAck,
 )
 from src.notifier import flush_pending_signal_outcomes, send_alert, send_signal_outcome
+from src.scanner_1_regime import scan_regime_with_data
+from src.scanner_2_strategy import generate_signal
 from src.signal_lifecycle import signal_lifecycle
-from src.symbol_resolver import instrument_type
+from src.symbol_resolver import instrument_type, sanitize_symbol, to_yfinance_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,31 @@ DEFAULT_FALLBACK_SL_PIPS = 20.0  # FX fallback only
 # signal-generation defaults, not a claim about broker contract specifications.
 METAL_FALLBACK_SL_PERCENT = 0.5
 CRYPTO_FALLBACK_SL_PERCENT = 1.0
+_TIMEFRAME_DURATION = {
+    "15m": timedelta(minutes=15),
+    "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1),
+    "4h": timedelta(hours=4),
+    "1d": timedelta(days=1),
+}
+_STRATEGY_ALIASES = {
+    "trend_pullback": StrategyType.TREND_PULLBACK,
+    "mean_reversion": StrategyType.MEAN_REVERSION_FADE,
+    "mean_reversion_fade": StrategyType.MEAN_REVERSION_FADE,
+    "volatility_breakout": StrategyType.VOLATILITY_BREAKOUT,
+    "breakout": StrategyType.VOLATILITY_BREAKOUT,
+    "pine_bridge": StrategyType.EXTERNAL_ALERT,
+    "tradingview": StrategyType.EXTERNAL_ALERT,
+    "external_alert": StrategyType.EXTERNAL_ALERT,
+}
+
+
+class MarketDataUnavailable(RuntimeError):
+    """Fresh market data could not be fetched for corroboration."""
+
+
+class AlertNotCorroborated(RuntimeError):
+    """The internal engine did not confirm the external alert."""
 
 # Prevent stocks, indices, futures codes, and malformed symbols from silently
 # falling through instrument_type() to FX pip/lot sizing.
@@ -137,6 +165,79 @@ def _release_alert_fingerprint(fingerprint: str) -> None:
         _SEEN_ALERTS.pop(fingerprint, None)
 
 
+def _validate_alert_time(alert: TradingViewAlert, now: datetime | None = None) -> None:
+    """Require a trustworthy bar timestamp and reject future/stale alerts."""
+    if not alert.bar_time:
+        raise HTTPException(status_code=422, detail="bar_time is required for TradingView alerts")
+    raw = alert.bar_time.strip()
+    try:
+        if raw.isdigit():
+            epoch = float(raw)
+            if len(raw) >= 13:
+                epoch /= 1000.0
+            event_time = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        else:
+            event_time = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if event_time.tzinfo is None:
+                event_time = event_time.replace(tzinfo=timezone.utc)
+            event_time = event_time.astimezone(timezone.utc)
+    except (ValueError, OverflowError, OSError) as exc:
+        raise HTTPException(status_code=422, detail="bar_time is invalid") from exc
+
+    current = now or datetime.now(timezone.utc)
+    age = current - event_time
+    if age < timedelta(minutes=-2):
+        raise HTTPException(status_code=422, detail="bar_time is in the future")
+    max_age = _TIMEFRAME_DURATION[alert.timeframe] + timedelta(minutes=10)
+    if age > max_age:
+        raise HTTPException(status_code=422, detail="TradingView alert is stale")
+
+
+def _strategy_for_alert(strategy_name: str | None) -> StrategyType:
+    """Map only recognized labels; unknown external labels remain rejected."""
+    if not strategy_name:
+        return StrategyType.EXTERNAL_ALERT
+    normalized = strategy_name.strip().lower().replace(" ", "_")
+    try:
+        return _STRATEGY_ALIASES[normalized]
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail="unsupported TradingView strategy label") from exc
+
+
+def _corroborate_alert(alert: TradingViewAlert):
+    """Require a fresh internal scan to confirm direction and approximate price."""
+    settings = get_settings()
+    raw_symbol = alert.ticker.upper().replace("=X", "").replace("=F", "")
+    symbol = sanitize_symbol(raw_symbol)
+    if symbol is None:
+        raise HTTPException(status_code=422, detail="unsupported ticker for market corroboration")
+    outcome = scan_regime_with_data(
+        symbol,
+        alert.timeframe,
+        settings,
+        fetch_symbol=to_yfinance_ticker(symbol),
+    )
+    if outcome is None:
+        raise MarketDataUnavailable(f"no fresh OHLCV data for {symbol}/{alert.timeframe}")
+    regime_result, frame = outcome
+    if frame is None or frame.empty or "Close" not in frame.columns:
+        raise MarketDataUnavailable(f"empty OHLCV data for {symbol}/{alert.timeframe}")
+
+    market_price = float(frame["Close"].iloc[-1])
+    atr = float(regime_result.metrics.atr)
+    tolerance = max(abs(market_price) * 0.0002, atr * 0.25)
+    if not math.isfinite(market_price) or abs(alert.price - market_price) > tolerance:
+        raise AlertNotCorroborated("TradingView price does not match the fresh project market feed")
+
+    if alert.signal == "NONE":
+        return None, regime_result, frame
+
+    signal = generate_signal(regime_result, frame, settings)
+    if signal is None or signal.direction.value != alert.signal:
+        raise AlertNotCorroborated("internal scanner did not produce a same-direction qualified signal")
+    return signal, regime_result, frame
+
+
 def _enforce_request_rate_limit(client_host: str) -> None:
     """Limit webhook requests per actual ASGI peer address (process-local)."""
     now = time.monotonic()
@@ -182,6 +283,7 @@ def _alert_to_signal(alert: TradingViewAlert) -> TradeSignal:
     settings = get_settings()
     direction = TradeDirection(alert.signal)
     kind = instrument_type(alert.ticker)
+    strategy = _strategy_for_alert(alert.strategy)
     if kind == "FX" and not _is_supported_fx_pair(alert.ticker):
         raise HTTPException(status_code=422, detail="unsupported ticker for FX risk sizing")
 
@@ -265,7 +367,7 @@ def _alert_to_signal(alert: TradingViewAlert) -> TradeSignal:
         symbol=alert.ticker,
         timeframe=alert.timeframe,
         direction=direction,
-        strategy=StrategyType.NO_TRADE if alert.strategy is None else StrategyType.TREND_PULLBACK,
+        strategy=strategy,
         regime=MarketRegime.STRONG_TREND_BULLISH if direction == TradeDirection.BUY else MarketRegime.STRONG_TREND_BEARISH,
         entry_price=alert.price,
         stop_loss_price=round(stop_loss_price, 8),
@@ -347,35 +449,73 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
         raise HTTPException(status_code=422, detail="invalid alert payload") from exc
 
     _verify_secret(alert.secret)
+    _validate_alert_time(alert)
+    _strategy_for_alert(alert.strategy)
+    if alert.signal != "NONE":
+        try:
+            _alert_to_signal(alert)  # validates provided stop/target geometry; never published
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("rejected TradingView alert due to invalid risk inputs (%s)", type(exc).__name__)
+            raise HTTPException(status_code=422, detail="invalid risk inputs in TradingView alert") from exc
     logger.info("received TradingView alert: %s %s @ %.5f (%s)", alert.ticker, alert.signal, alert.price, alert.timeframe)
-
-    flush_pending_signal_outcomes()
-    if alert.signal == "NONE":
-        outcome = signal_lifecycle.observe_price(alert.ticker, alert.timeframe, alert.price)
-        if outcome is not None:
-            send_signal_outcome(outcome)
-        signal_lifecycle.reset_block(alert.ticker, alert.timeframe)
-        _RECENT_ALERTS.append(alert.model_copy(update={"secret": None}))
-        return WebhookAck(status="reset", detail="no active setup; future signals may be accepted")
-
-    try:
-        signal = _alert_to_signal(alert)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("rejected TradingView alert due to invalid risk inputs (%s)", type(exc).__name__)
-        raise HTTPException(status_code=422, detail="invalid risk inputs in TradingView alert") from exc
 
     fingerprint = _alert_fingerprint(alert)
     if not _claim_alert_fingerprint(fingerprint):
         return WebhookAck(status="duplicate_suppressed", detail="identical alert was already received")
 
-    # Do not retain the credential after verification; recent-alert inspection
-    # only needs the public signal fields.
+    flush_pending_signal_outcomes()
+    try:
+        # TradingView is a confirmation input only. The recommendation below
+        # is always the internally generated, risk-checked signal from the
+        # same fresh OHLCV frame, never the raw webhook price/strategy.
+        signal, _regime_result, frame = await asyncio.to_thread(_corroborate_alert, alert)
+    except AlertNotCorroborated:
+        _RECENT_ALERTS.append(alert.model_copy(update={"secret": None}))
+        logger.info("TradingView alert not corroborated for %s/%s; no recommendation published", alert.ticker, alert.timeframe)
+        return WebhookAck(
+            status="not_corroborated",
+            detail="fresh project data or the internal strategy did not confirm the alert; nothing was published",
+        )
+    except MarketDataUnavailable:
+        _release_alert_fingerprint(fingerprint)
+        logger.warning("market data unavailable for TradingView alert %s/%s", alert.ticker, alert.timeframe)
+        return JSONResponse(
+            status_code=503,
+            content=WebhookAck(status="market_data_unavailable", detail="fresh market data unavailable; no recommendation was published").model_dump(),
+        )
+    except HTTPException:
+        _release_alert_fingerprint(fingerprint)
+        raise
+    except Exception as exc:
+        _release_alert_fingerprint(fingerprint)
+        logger.error("could not corroborate TradingView alert for %s (%s)", alert.ticker, type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content=WebhookAck(status="market_validation_failed", detail="internal market validation failed; no recommendation was published").model_dump(),
+        )
+
+    # Never retain the credential after verification.
     _RECENT_ALERTS.append(alert.model_copy(update={"secret": None}))
+    if signal is None:
+        try:
+            outcome = signal_lifecycle.observe_frame(alert.ticker, alert.timeframe, frame)
+            if outcome is not None:
+                send_signal_outcome(outcome)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            _release_alert_fingerprint(fingerprint)
+            logger.exception("could not evaluate TradingView reset for %s/%s", alert.ticker, alert.timeframe)
+            return JSONResponse(
+                status_code=503,
+                content=WebhookAck(status="outcome_check_failed", detail="fresh price data could not be applied to the open recommendation").model_dump(),
+            )
+        signal_lifecycle.reset_block(alert.ticker, alert.timeframe)
+        return WebhookAck(status="reset", detail="fresh market data confirmed no active TradingView setup")
+
     try:
         dispatch_results = send_alert(
-            signal, source="tradingview", entry_bar_id=alert.bar_time
+            signal, source="tradingview", entry_bar_id=str(frame.index[-1]), market_frame=frame
         )
     except Exception as exc:
         _release_alert_fingerprint(fingerprint)

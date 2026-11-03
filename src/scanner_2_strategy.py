@@ -13,13 +13,17 @@ and momentum quality filter before approving the signal.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
 
 import pandas as pd
 
 from config import Settings, get_settings
 from src import indicators as ind
+from src.gold_analysis import analyze_gold_market, validate_gold_entry
 from src.models import MarketRegime, RegimeResult, StrategyType, TradeDirection, TradeSignal
+from src.signal_quality import assess_signal_quality
+from src.symbol_resolver import instrument_type
 from src.strategy_params import get_strategy_params
 from strategies.breakout import BreakoutStrategy
 from strategies.mean_reversion import MeanReversionStrategy
@@ -42,8 +46,11 @@ def _validate_and_refine_signal(
 ) -> TradeSignal | None:
     """فلتر احترافي للتأكد من جودة نقطة الدخول والشموع والزخم قبل اعتماد التوصية."""
     try:
+        is_gold = instrument_type(signal.symbol) == "METAL" and signal.symbol.upper().replace("=F", "") in {
+            "XAUUSD", "GC"
+        }
         if len(df) < 20:
-            return signal
+            return None if is_gold else signal
 
         last_open = float(df["Open"].iloc[-1])
         last_high = float(df["High"].iloc[-1])
@@ -90,11 +97,6 @@ def _validate_and_refine_signal(
                 logger.info("%s/%s: BUY rejected (bearish rejection wick)", regime_result.symbol, regime_result.timeframe)
                 return None
 
-            # تعزيز درجة الثقة إذا كانت الشمعة صاعدة بقوة والزخم متصاعد
-            if last_close > last_open and last_close >= prev_close and rsi_now >= rsi_prev:
-                bonus = 0.06 if body_ratio >= 0.45 else 0.03
-                regime_result.confidence = min(1.0, round(regime_result.confidence + bonus, 4))
-
         elif signal.direction == TradeDirection.SELL:
             # في صفقات البيع (اتجاه أو اختراق): لا نبيع في قاع تشبع بيعي حاد (RSI < 26)
             if signal.strategy != StrategyType.MEAN_REVERSION_FADE and rsi_now < 26:
@@ -106,10 +108,17 @@ def _validate_and_refine_signal(
                 logger.info("%s/%s: SELL rejected (bullish rejection wick)", regime_result.symbol, regime_result.timeframe)
                 return None
 
-            # تعزيز درجة الثقة إذا كانت الشمعة هابطة بقوة والزخم هابط
-            if last_close < last_open and last_close <= prev_close and rsi_now <= rsi_prev:
-                bonus = 0.06 if body_ratio >= 0.45 else 0.03
-                regime_result.confidence = min(1.0, round(regime_result.confidence + bonus, 4))
+        if is_gold:
+            gold_context = analyze_gold_market(df, atr_val)
+            is_valid, reason = validate_gold_entry(
+                gold_context,
+                signal.direction.value,
+                float(signal.entry_price),
+                float(signal.take_profit_1_price),
+            )
+            if not is_valid:
+                logger.info("%s/%s: gold setup rejected (%s)", regime_result.symbol, regime_result.timeframe, reason)
+                return None
 
         return signal
     except Exception:
@@ -144,9 +153,30 @@ def generate_signal(
         signal = strategy.generate(regime_result, df, settings)
         if signal is None:
             return None
-        # في الفحص الحقيقي (عندما لا يكون هناك اختبار overrides)، نطبق الفلتر الاحترافي الإضافي
-        if param_overrides is None:
-            signal = _validate_and_refine_signal(signal, regime_result, df)
+        # The same quality checks must apply in live scans and backtests; an
+        # optimizer override may change parameters but cannot bypass safety.
+        signal = _validate_and_refine_signal(signal, regime_result, df)
+        if signal is None:
+            return None
+        quality = assess_signal_quality(
+            signal,
+            regime_result.confidence,
+            regime_result.regime,
+            regime_result.metrics.atr,
+            df,
+            settings,
+        )
+        if not quality.eligible:
+            logger.info(
+                "%s/%s: signal rejected by quality gate (score=%d grade=%s): %s",
+                regime_result.symbol,
+                regime_result.timeframe,
+                quality.score,
+                quality.grade,
+                "; ".join(quality.reasons),
+            )
+            return None
+        signal = replace(signal, quality_score=quality.score, quality_grade=quality.grade)
         return signal
     except Exception:
         logger.exception(

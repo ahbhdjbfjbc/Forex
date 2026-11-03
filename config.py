@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # triggered setups — see min_signal_confidence below.
     auto_scan_interval_seconds: int = 3_600  # 1 hour
     min_signal_confidence: float = 0.72      # تم رفع الدقة المطلوبة للتوصيات
+    min_signal_quality_score: int = 70       # checklist score, not a win probability
 
     # Alerts & News Filter Settings
     notify_no_signals: bool = False          # رسائل عدم وجود توصيات اختيارية لتجنب الإزعاج الدوري
@@ -67,6 +68,14 @@ class Settings(BaseSettings):
     # On-demand Telegram /scan: which configured timeframe actually drives
     # the trade signal; the rest of `timeframes` are shown for context only.
     telegram_primary_timeframe: str = "1h"
+
+    # Optional evidence-based review. Local statistics require no external API;
+    # remote AI is used only when enabled with explicit provider credentials.
+    ai_review_enabled: bool = False
+    ai_report_interval_hours: int = 24
+    ai_api_base_url: str = ""
+    ai_api_key: str = ""
+    ai_model: str = ""
 
     # Paper trading (OANDA v20 practice/demo account only — see
     # src/oanda_client.py, which refuses to run against anything but
@@ -107,11 +116,25 @@ class Settings(BaseSettings):
             raise ValueError("scan intervals must be greater than zero")
         return v
 
+    @field_validator("ai_report_interval_hours")
+    @classmethod
+    def _valid_ai_report_interval(cls, v: int) -> int:
+        if not 1 <= v <= 168:
+            raise ValueError("ai_report_interval_hours must be between 1 and 168")
+        return v
+
     @field_validator("min_signal_confidence")
     @classmethod
     def _confidence_range(cls, v: float) -> float:
         if not math.isfinite(v) or not 0 <= v <= 1:
             raise ValueError("min_signal_confidence must be between 0 and 1")
+        return v
+
+    @field_validator("min_signal_quality_score")
+    @classmethod
+    def _quality_score_range(cls, v: int) -> int:
+        if not 0 <= v <= 100:
+            raise ValueError("min_signal_quality_score must be between 0 and 100")
         return v
 
     @field_validator("webhook_port")

@@ -35,6 +35,7 @@ class StrategyType(str, Enum):
     TREND_PULLBACK = "TREND_PULLBACK"
     MEAN_REVERSION_FADE = "MEAN_REVERSION_FADE"
     VOLATILITY_BREAKOUT = "VOLATILITY_BREAKOUT"
+    EXTERNAL_ALERT = "EXTERNAL_ALERT"
     NO_TRADE = "NO_TRADE"
 
 
@@ -105,6 +106,8 @@ class TradeSignal:
     risk: RiskParameters
     rationale: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    quality_score: int | None = None
+    quality_grade: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -151,6 +154,14 @@ class TradingViewAlert(BaseModel):
         normalized = value.strip()
         if not re.fullmatch(r"[A-Za-z0-9]{1,16}", normalized):
             raise ValueError("timeframe contains invalid characters")
+        aliases = {
+            "15": "15m", "15M": "15m", "30": "30m", "30M": "30m",
+            "60": "1h", "1H": "1h", "240": "4h", "4H": "4h",
+            "D": "1d", "1D": "1d",
+        }
+        normalized = aliases.get(normalized.upper(), normalized.lower())
+        if normalized not in {"15m", "30m", "1h", "4h", "1d"}:
+            raise ValueError("timeframe must be one of 15m, 30m, 1h, 4h, or 1d")
         return normalized
 
     @field_validator("bar_time", mode="before")

@@ -8,7 +8,10 @@ Run with: pytest tests/ -v
 from __future__ import annotations
 
 import dataclasses
+import time
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -48,6 +51,8 @@ def settings() -> Settings:
         account_size_usd=10_000.0,
         risk_percent_per_trade=1.0,
         min_risk_reward=2.0,
+        # Synthetic regime fixtures intentionally land below the production default.
+        min_signal_confidence=0.50,
         webhook_shared_secret="test-secret",
     )
 
@@ -336,8 +341,9 @@ class TestNotifierFormatting:
         assert "شراء (BUY)" in message
         assert "سعر الدخول:" in message
         assert "وقف الخسارة:" in message
-        assert "الهدف الأول:" in message
-        assert "الهدف الثاني:" in message
+        assert message.count("الهدف الوحيد:") == 1
+        assert "الهدف الأول:" not in message
+        assert "الهدف الثاني:" not in message
         assert "حجم العقد المقترح:" in message
         assert "الوقت:" in message
 
@@ -356,6 +362,17 @@ def client(monkeypatch) -> TestClient:
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", "")
     get_settings.cache_clear()
+    monkeypatch.setattr(
+        "src.tradingview_bridge._corroborate_alert",
+        lambda alert: (
+            SimpleNamespace(),
+            None,
+            pd.DataFrame(
+                {"Open": [alert.price], "High": [alert.price], "Low": [alert.price], "Close": [alert.price], "Volume": [1]},
+                index=pd.DatetimeIndex([pd.Timestamp.now(tz="UTC")]),
+            ),
+        ),
+    )
     return TestClient(bridge_app)
 
 
@@ -374,6 +391,7 @@ class TestTradingViewBridge:
             "timeframe": "15m",
             "signal": "BUY",
             "price": 1.0850,
+            "bar_time": int(time.time() * 1000),
             "secret": "test-secret-which-is-longer-than-32-chars",
         }
         resp = client.post("/webhook/tradingview", json=payload)

@@ -131,7 +131,9 @@ def test_sell_stop_loss_closes_with_negative_one_r(tmp_path):
     assert outcome.r_multiple == -1.0
 
 
-def test_same_bar_stop_and_target_is_classified_conservatively(tmp_path):
+def test_same_bar_stop_and_target_is_left_ambiguous_without_invented_exit(tmp_path):
+    from src.notifier import format_signal_outcome
+
     store = SignalLifecycleStore(tmp_path / "state.sqlite3")
     store.register_signal(make_signal())
 
@@ -140,9 +142,14 @@ def test_same_bar_stop_and_target_is_classified_conservatively(tmp_path):
     )
 
     assert outcome is not None
-    assert outcome.outcome == "AMBIGUOUS_STOP_FIRST"
-    assert outcome.exit_price == pytest.approx(1.0900)
-    assert outcome.r_multiple == -1.0
+    assert outcome.outcome == "AMBIGUOUS"
+    assert outcome.exit_price is None
+    assert outcome.r_multiple is None
+    assert outcome.points is None
+    message = format_signal_outcome(outcome)
+    assert "نتيجة ملتبسة" in message
+    assert "غير محسوبة" in message
+    assert "غير قابل للتحديد" in message
 
 
 def test_direction_reversal_closes_old_signal_and_opens_new_one(tmp_path):
@@ -172,3 +179,34 @@ def test_setup_reset_during_open_trade_allows_new_signal_after_trade_closes(tmp_
     next_signal = store.register_signal(make_signal(entry=1.1400))
     assert next_signal.accepted is True
     assert next_signal.signal_id != original.signal_id
+
+
+def test_outcome_records_candle_close_time_duration_and_fx_pips(tmp_path):
+    from dataclasses import replace
+    import pandas as pd
+
+    from src.notifier import format_signal_outcome
+
+    entry_time = pd.Timestamp("2026-10-30T10:00:00Z")
+    close_time = entry_time + pd.Timedelta(minutes=90)
+    signal = replace(make_signal(), timestamp=entry_time.to_pydatetime())
+    store = SignalLifecycleStore(tmp_path / "state.sqlite3")
+    store.register_signal(signal, source="test-source", entry_bar_id=entry_time)
+
+    outcome = store.observe_bar(
+        "EURUSD=X", "60", high=1.1310, low=1.1150, close=1.1300, bar_id=close_time
+    )
+
+    assert outcome is not None
+    assert outcome.points == 300.0
+    assert outcome.points_unit == "pips"
+    assert outcome.duration_seconds == 90 * 60
+    assert outcome.source == "test-source"
+    assert outcome.stop_loss_price == signal.stop_loss_price
+    assert outcome.target_price == signal.take_profit_2_price
+    assert outcome.closed_at.startswith("2026-10-30T11:30:00")
+    text = format_signal_outcome(outcome)
+    assert "300 pips" in text
+    assert "ساعة" in text
+    assert "Bid/Ask" in text
+    assert "وقف الخسارة" in text and "الهدف" in text

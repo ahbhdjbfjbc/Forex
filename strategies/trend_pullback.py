@@ -81,10 +81,12 @@ class TrendPullbackStrategy(Strategy):
 
         if is_bullish:
             structural_sl = min(pr for _, pr in swing_lows) if swing_lows else close - atr_val * p.atr_sl_multiplier
-            stop_loss = min(structural_sl, close - atr_val * p.atr_sl_multiplier)
+            # The tighter valid stop for a long is the higher price below entry.
+            stop_loss = max(structural_sl, close - atr_val * p.atr_sl_multiplier)
         else:
             structural_sl = max(pr for _, pr in swing_highs) if swing_highs else close + atr_val * p.atr_sl_multiplier
-            stop_loss = max(structural_sl, close + atr_val * p.atr_sl_multiplier)
+            # The tighter valid stop for a short is the lower price above entry.
+            stop_loss = min(structural_sl, close + atr_val * p.atr_sl_multiplier)
 
         rationale = (
             f"Trend pullback ({'bullish' if is_bullish else 'bearish'}): EMA20 touch="
