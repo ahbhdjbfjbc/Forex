@@ -15,6 +15,8 @@ import pandas as pd
 from matplotlib.patches import Rectangle
 
 from src.models import TradeDirection, TradeSignal
+from src.price_format import format_price
+from src.signal_context import build_signal_context
 from src.storage import get_data_dir
 from src.symbol_resolver import instrument_type
 
@@ -51,14 +53,19 @@ def create_signal_chart(signal: TradeSignal, frame: pd.DataFrame, signal_id: str
     image_path = chart_dir / f"{signal_id}.png"
     source_path = chart_dir / f"{signal_id}.json"
     visible = numeric.tail(min(100, len(numeric))).copy()
-    previous = numeric.iloc[:-1].tail(50)
-    support = float(previous["Low"].min()) if not previous.empty else float(visible["Low"].min())
-    resistance = float(previous["High"].max()) if not previous.empty else float(visible["High"].max())
+    first_visible = len(numeric) - len(visible)
+    # Same context object the Telegram caption uses -> identical numbers.
+    context = build_signal_context(signal, numeric)
+    support = float(context.support)
+    resistance = float(context.resistance)
+
+    def price_label(value: float) -> str:
+        return format_price(value, signal.symbol)
     ema20 = visible["Close"].ewm(span=20, adjust=False).mean()
     target = float(signal.take_profit_2_price)
 
     plt.style.use("dark_background")
-    fig, ax = plt.subplots(figsize=(10, 7), dpi=180)
+    fig, ax = plt.subplots(figsize=(10, 7.5), dpi=160)
     fig.patch.set_facecolor("#0b1020")
     ax.set_facecolor("#111a2e")
     up_color, down_color = "#21c78a", "#f05d6c"
@@ -73,6 +80,31 @@ def create_signal_chart(signal: TradeSignal, frame: pd.DataFrame, signal_id: str
                                facecolor=color, edgecolor=color, linewidth=0.6, zorder=3))
 
     ax.plot(x_values, ema20.to_list(), color="#62a8ff", linewidth=1.25, alpha=0.9, label="EMA 20")
+
+    # Analysis zones: FVG / order blocks that support the trade, from where
+    # they formed to the latest bar (computed only from closed candles).
+    last_x = len(visible) - 1
+    structure = context.structure
+    structure_offset = structure.offset if structure is not None else 0
+    for zone in context.zones:
+        start = max(0, structure_offset + zone.start_index - first_visible)
+        color = "#8f6bff" if zone.kind == "FVG" else "#3fb6c8"
+        label = "FVG" if zone.kind == "FVG" else "ORDER BLOCK"
+        ax.add_patch(Rectangle((start - 0.5, zone.low), last_x - start + 1.0, zone.high - zone.low,
+                               facecolor=color, alpha=0.18, edgecolor=color, linewidth=0.8, zorder=1))
+        ax.text(start, zone.high, f" {label}", color=color, fontsize=10, fontweight="bold",
+                va="bottom", ha="left", zorder=4)
+    if context.entry_high > context.entry_low:
+        ax.axhspan(context.entry_low, context.entry_high, color="#f5ce5b", alpha=0.16, zorder=1,
+                   label="Entry zone")
+    if structure is not None and structure.last_event is not None:
+        event = structure.last_event
+        event_x = structure_offset + event.bar_index - first_visible
+        if 0 <= event_x <= last_x:
+            color = "#42d392" if event.direction == "BULLISH" else "#ff5a66"
+            ax.hlines(event.level, max(0, event_x - 8), event_x, color=color, linewidth=1.4, zorder=4)
+            ax.text(event_x, event.level, f" {event.kind}", color=color, fontsize=10,
+                    fontweight="bold", va="bottom" if event.direction == "BULLISH" else "top", zorder=5)
     levels = [
         (float(signal.entry_price), "ENTRY", "#f5ce5b", "-"),
         (float(signal.stop_loss_price), "STOP", "#ff5a66", "--"),
@@ -82,8 +114,19 @@ def create_signal_chart(signal: TradeSignal, frame: pd.DataFrame, signal_id: str
     ]
     for y, label, color, style in levels:
         ax.axhline(y, color=color, linestyle=style, linewidth=1.25, alpha=0.9)
-        ax.text(1.005, y, f"{label}  {_price_text(y)}", transform=ax.get_yaxis_transform(),
-                color=color, fontsize=8, va="center", ha="left", clip_on=False)
+    # Keep right-hand labels from overlapping when levels are close together.
+    ax.autoscale_view()
+    low_lim, high_lim = ax.get_ylim()
+    low_lim = min(low_lim, min(y for y, *_ in levels))
+    high_lim = max(high_lim, max(y for y, *_ in levels))
+    ax.set_ylim(low_lim, high_lim)
+    min_gap = (high_lim - low_lim) * 0.04
+    placed: list[float] = []
+    for y, label, color, _style in sorted(levels, key=lambda item: item[0]):
+        label_y = y if not placed or y - placed[-1] >= min_gap else placed[-1] + min_gap
+        placed.append(label_y)
+        ax.text(1.01, label_y, f"{label}  {price_label(y)}", transform=ax.get_yaxis_transform(),
+                color=color, fontsize=11, fontweight="bold", va="center", ha="left", clip_on=False)
 
     time_labels = []
     for value in visible.index:
@@ -94,26 +137,29 @@ def create_signal_chart(signal: TradeSignal, frame: pd.DataFrame, signal_id: str
     tick_step = max(1, len(x_values) // 8)
     ticks = x_values[::tick_step]
     ax.set_xticks(ticks)
-    ax.set_xticklabels([time_labels[i] for i in ticks], rotation=25, ha="right", fontsize=8)
+    ax.set_xticklabels([time_labels[i] for i in ticks], rotation=25, ha="right", fontsize=10)
+    ax.tick_params(axis="y", labelsize=10)
     ax.grid(color="#718096", linewidth=0.4, alpha=0.18)
     ax.set_ylabel("Price")
     direction = "BUY" if signal.direction == TradeDirection.BUY else "SELL"
     source_label = "Yahoo Finance OHLCV"
     if signal.symbol.upper() == "XAUUSD":
         source_label += " · GC=F COMEX gold-futures proxy (not spot)"
-    title = f"TONPO Signals  |  {signal.symbol}  |  {signal.timeframe.upper()}  |  {direction}"
-    ax.set_title(title, loc="left", fontsize=14, color="#f5f7fb", pad=20, fontweight="bold")
-    fig.text(0.12, 0.925,
-             f"Entry {_price_text(signal.entry_price)}  ·  SL {_price_text(signal.stop_loss_price)}  ·  Target {_price_text(target)}",
-             color="#c8d2e2", fontsize=9)
+    direction_color = "#21c78a" if direction == "BUY" else "#f05d6c"
+    fig.text(0.10, 0.965, "TONPO Signals", color="#f5ce5b", fontsize=17, fontweight="bold", va="top")
+    fig.text(0.78, 0.965, f"{signal.symbol}  ·  {signal.timeframe.upper()}  ·  {direction}",
+             color=direction_color, fontsize=17, fontweight="bold", va="top", ha="right")
+    fig.text(0.10, 0.915,
+             f"Entry {price_label(signal.entry_price)}  ·  SL {price_label(signal.stop_loss_price)}  ·  Target {price_label(target)}",
+             color="#c8d2e2", fontsize=12, va="top")
     created = pd.Timestamp(signal.timestamp)
     if created.tzinfo is not None:
         created = created.tz_convert("UTC")
     fig.text(0.12, 0.035,
              f"Created {created.strftime('%Y-%m-%d %H:%M:%S')} UTC  |  {source_label}  |  OHLCV candles are the analysis source",
-             color="#9ba9bf", fontsize=7.5)
-    ax.legend(loc="upper left", facecolor="#111a2e", edgecolor="#34415a", fontsize=8)
-    fig.subplots_adjust(left=0.10, right=0.80, top=0.86, bottom=0.16)
+             color="#9ba9bf", fontsize=8.5)
+    ax.legend(loc="upper left", facecolor="#111a2e", edgecolor="#34415a", fontsize=10)
+    fig.subplots_adjust(left=0.10, right=0.78, top=0.86, bottom=0.16)
     temporary_image = image_path.with_suffix(".png.tmp")
     fig.savefig(temporary_image, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
     plt.close(fig)
@@ -141,6 +187,15 @@ def create_signal_chart(signal: TradeSignal, frame: pd.DataFrame, signal_id: str
             "single_chart_target": target,
             "support": support,
             "resistance": resistance,
+            "entry_zone": [float(context.entry_low), float(context.entry_high)],
+            "analysis_zones": [
+                {"kind": z.kind, "direction": z.direction, "low": z.low, "high": z.high} for z in context.zones
+            ],
+            "last_structure_break": (
+                {"kind": context.structure.last_event.kind, "direction": context.structure.last_event.direction,
+                 "level": context.structure.last_event.level}
+                if context.structure is not None and context.structure.last_event is not None else None
+            ),
             "ema20_last": float(ema20.iloc[-1]),
         },
         "ohlcv": [

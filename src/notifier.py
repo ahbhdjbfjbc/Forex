@@ -75,11 +75,18 @@ def format_message(signal: TradeSignal, market_frame=None) -> str:
     direction_emoji = DIRECTION_EMOJI.get(signal.direction, "")
     direction_label = DIRECTION_LABELS.get(signal.direction, signal.direction.value)
     tf_label = signal.timeframe.upper()
+    from src.price_format import format_price
+    from src.signal_context import build_signal_context
+
+    def fp(value) -> str:
+        return format_price(value, signal.symbol)
+
+    context = build_signal_context(signal, market_frame)
 
     if instrument_type(signal.symbol) == "FX":
-        sl_text = f"🛑 وقف الخسارة: {signal.stop_loss_price} (-{signal.stop_loss_pips:g} نقطة)"
+        sl_text = f"🛑 وقف الخسارة: {fp(signal.stop_loss_price)} (-{signal.stop_loss_pips:g} نقطة)"
         target_text = (
-            f"🎯 الهدف الوحيد: {signal.take_profit_2_price} "
+            f"🎯 الهدف الوحيد: {fp(signal.take_profit_2_price)} "
             f"(+{signal.take_profit_2_pips:g} نقطة | العائد 1:{signal.take_profit_2_rr:g})"
         )
         size_text = f"💼 حجم العقد المقترح: {signal.risk.lot_size:g} لوت قياسي"
@@ -93,20 +100,22 @@ def format_message(signal: TradeSignal, market_frame=None) -> str:
             if instrument_type(signal.symbol) == "METAL"
             else "وحدة"
         )
-        sl_text = f"🛑 وقف الخسارة: {signal.stop_loss_price} (مسافة سعرية {signal.stop_loss_pips:g})"
+        sl_text = f"🛑 وقف الخسارة: {fp(signal.stop_loss_price)} (مسافة سعرية {signal.stop_loss_pips:g})"
         target_text = (
-            f"🎯 الهدف الوحيد: {signal.take_profit_2_price} "
+            f"🎯 الهدف الوحيد: {fp(signal.take_profit_2_price)} "
             f"(مسافة سعرية {signal.take_profit_2_pips:g} | العائد 1:{signal.take_profit_2_rr:g})"
         )
         size_text = f"💼 الحجم التقريبي: {signal.risk.lot_size:g} {unit} (قد يختلف حجم العقد حسب الوسيط)"
 
     context_lines = []
     if market_frame is not None and len(market_frame) > 1:
-        prior = market_frame.iloc[:-1].tail(50)
-        if not prior.empty:
-            support = float(prior["Low"].min())
-            resistance = float(prior["High"].max())
-            context_lines.append(f"📐 دعم/مقاومة سابقة: {support:g} / {resistance:g}")
+        context_lines.append(f"📐 دعم/مقاومة: {fp(context.support)} / {fp(context.resistance)}")
+        structure_text = context.structure_text()
+        if structure_text:
+            context_lines.append(f"🧱 {structure_text}")
+        for zone in context.zones:
+            name = "فجوة FVG" if zone.kind == "FVG" else "Order Block"
+            context_lines.append(f"🟪 منطقة {name} داعمة: {fp(zone.low)} – {fp(zone.high)}")
     if signal.symbol.upper() == "XAUUSD":
         context_lines.append("⚠️ مصدر الذهب: GC=F (عقود COMEX الآجلة)، وليس سعراً فورياً XAUUSD")
 
@@ -122,7 +131,12 @@ def format_message(signal: TradeSignal, market_frame=None) -> str:
             else []
         ),
         "------------------------------",
-        f"🔹 سعر الدخول: {signal.entry_price}",
+        f"🔹 سعر الدخول: {fp(signal.entry_price)}",
+        *(
+            [f"🔸 منطقة الدخول: {fp(context.entry_low)} – {fp(context.entry_high)}"]
+            if context.entry_low != context.entry_high
+            else []
+        ),
         sl_text,
         target_text,
         *context_lines,
