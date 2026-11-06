@@ -477,7 +477,9 @@ def run_full_watchlist_scan(settings: Settings | None = None) -> str:
                 signal, settings, source="telegram-scan-all", entry_bar_id=str(df.index[-1]),
                 market_frame=df,
             )
-            if delivery.get("duplicate"):
+            if getattr(delivery, "blocked_reason", None):
+                state = f"لم تُنشر: {delivery.blocked_reason}"
+            elif delivery.get("duplicate"):
                 state = "لديها توصية نشطة بالفعل؛ لم تُكرر الرسالة"
             elif any(value for channel, value in delivery.items() if channel != "duplicate"):
                 state = "تم إرسالها"
@@ -1049,7 +1051,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
         if outcome:
             regime_result, df = outcome
-            signal = generate_signal(regime_result, df, settings)
+            signal = await asyncio.to_thread(generate_signal, regime_result, df, settings)
             if signal:
                 delivery = await asyncio.to_thread(
                     send_alert,
@@ -1059,6 +1061,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     entry_bar_id=str(df.index[-1]),
                     market_frame=df,
                 )
+                if getattr(delivery, "blocked_reason", None):
+                    await msg_target.reply_text(
+                        f"⛔ لم تُنشر التوصية: {delivery.blocked_reason}"
+                    )
+                    return
                 if delivery.get("duplicate"):
                     await msg_target.reply_text(
                         "ℹ️ لهذه التوصية سجل نشط أو نتيجة حديثة؛ لم أكرر نشرها."

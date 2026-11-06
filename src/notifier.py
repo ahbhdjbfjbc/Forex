@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import logging
 import platform
 import subprocess
+import threading
 from pathlib import Path
 
 import httpx
@@ -21,6 +22,19 @@ from src.signal_lifecycle import SignalOutcome, signal_lifecycle
 from src.symbol_resolver import instrument_type
 
 logger = logging.getLogger(__name__)
+
+# The channel message ID of the most recent successful sendPhoto on this
+# thread, so send_alert can persist it and reply to it with the outcome.
+_delivery_state = threading.local()
+
+
+class DeliveryResult(dict):
+    """Per-channel delivery flags plus an optional publish-gate block reason.
+
+    Behaves exactly like the original dict for existing callers; a blocked
+    publication has every channel False and `blocked_reason` set."""
+
+    blocked_reason: str | None = None
 
 # Public (imported by src/telegram_bot.py for the on-demand /scan report so
 # both message formats stay in sync instead of duplicating these labels).
@@ -127,16 +141,22 @@ def _get_target_telegram_id(settings: Settings) -> str:
     return str(settings.telegram_chat_id).strip()
 
 
-def send_telegram(message: str, settings: Settings) -> bool:
+def send_telegram(message: str, settings: Settings, *, reply_to_message_id: int | None = None) -> bool:
     target_chat_id = _get_target_telegram_id(settings)
     if not settings.telegram_bot_token or not target_chat_id:
         logger.debug("telegram not configured, skipping")
         return False
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    body = {"chat_id": target_chat_id, "text": message}
+    if reply_to_message_id:
+        # Thread the result under the original recommendation; still send if
+        # the original post was deleted.
+        body["reply_parameters"] = {
+            "message_id": int(reply_to_message_id),
+            "allow_sending_without_reply": True,
+        }
     try:
-        resp = httpx.post(
-            url, json={"chat_id": target_chat_id, "text": message}, timeout=10.0
-        )
+        resp = httpx.post(url, json=body, timeout=10.0)
         if resp.status_code == 429:
             logger.warning("telegram rate-limited (HTTP %s)", resp.status_code)
             return False
@@ -174,6 +194,9 @@ def send_telegram_photo(caption: str, image_path: str | Path, settings: Settings
         if not isinstance(payload, dict) or payload.get("ok") is not True:
             logger.warning("telegram API did not acknowledge photo delivery")
             return False
+        result = payload.get("result")
+        message_id = result.get("message_id") if isinstance(result, dict) else None
+        _delivery_state.last_photo_message_id = message_id if isinstance(message_id, int) else None
         return True
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.error("telegram photo send failed (%s)", type(exc).__name__)
@@ -245,12 +268,20 @@ def send_desktop(message: str, settings: Settings) -> bool:
         return False
 
 
-def dispatch_message(message: str, settings: Settings | None = None) -> dict[str, bool]:
+def dispatch_message(
+    message: str, settings: Settings | None = None, *, reply_to_message_id: int | None = None
+) -> dict[str, bool]:
     """يرسل أي رسالة نصية (توصية أو تنبيه حالة) إلى جميع القنوات المفعلة بأمان."""
     settings = settings or get_settings()
     results: dict[str, bool] = {}
+
+    def telegram(text: str, cfg: Settings) -> bool:
+        if reply_to_message_id:
+            return send_telegram(text, cfg, reply_to_message_id=reply_to_message_id)
+        return send_telegram(text, cfg)
+
     channels = (
-        ("telegram", send_telegram),
+        ("telegram", telegram),
         ("discord", send_discord),
         ("desktop", send_desktop),
     )
@@ -320,8 +351,21 @@ def format_signal_outcome(outcome: SignalOutcome) -> str:
 def send_signal_outcome(
     outcome: SignalOutcome, settings: Settings | None = None
 ) -> dict[str, bool]:
-    """Dispatch a terminal result and acknowledge it in the durable outbox."""
-    results = dispatch_message(format_signal_outcome(outcome), settings)
+    """Dispatch a terminal result and acknowledge it in the durable outbox.
+
+    When the channel message ID of the original recommendation is known, the
+    result is posted as a reply to it so every trade and its outcome stay
+    linked in the same channel."""
+    try:
+        original_message_id = signal_lifecycle.telegram_message_id(outcome.signal_id)
+    except Exception:
+        original_message_id = None
+    if original_message_id:
+        results = dispatch_message(
+            format_signal_outcome(outcome), settings, reply_to_message_id=original_message_id
+        )
+    else:
+        results = dispatch_message(format_signal_outcome(outcome), settings)
     if any(results.values()):
         signal_lifecycle.mark_outcome_sent(outcome.signal_id)
     return results
@@ -350,6 +394,14 @@ def send_alert(
     if market_frame is None:
         logger.warning("refusing to publish %s/%s without its analyzed OHLCV frame", signal.symbol, signal.timeframe)
         return {"telegram": False, "discord": False, "desktop": False, "duplicate": False}
+
+    from src.publish_gate import check_publish_allowed
+
+    decision = check_publish_allowed(signal, settings)
+    if not decision.allowed:
+        blocked = DeliveryResult(telegram=False, discord=False, desktop=False, duplicate=False)
+        blocked.blocked_reason = decision.reason or "رفضها فحص النشر"
+        return blocked
 
     flush_pending_signal_outcomes(settings)
     tick_outcome = signal_lifecycle.observe_price(
@@ -384,7 +436,14 @@ def send_alert(
         return {"telegram": False, "discord": False, "desktop": False, "duplicate": False}
 
     message = format_message(signal, market_frame)
+    _delivery_state.last_photo_message_id = None
     results = dispatch_signal(message, chart_assets.image_path, settings)
+    message_id = getattr(_delivery_state, "last_photo_message_id", None)
+    if message_id and results.get("telegram"):
+        try:
+            signal_lifecycle.set_telegram_message_id(registration.signal_id, message_id)
+        except Exception as exc:
+            logger.warning("could not store channel message id (%s)", type(exc).__name__)
     if not any(results.values()):
         signal_lifecycle.cancel_signal(registration.signal_id)
     if not any(results.values()):

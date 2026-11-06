@@ -46,6 +46,17 @@ class Settings(BaseSettings):
     enable_news_filter: bool = True          # تفعيل فلتر التوقف وقت الأخبار القوية
     news_buffer_minutes: int = 30            # التوقف قبل وبعد الخبر بـ 30 دقيقة
 
+    # Final publish gate (src/publish_gate.py) applied to every publication
+    # path: auto-scan, /scan_all, manual publish button and TradingView webhook.
+    enable_mtf_filter: bool = True           # رفض الصفقة إذا عاكسها الإطار الأعلى
+    enable_dxy_filter: bool = True           # فلتر مؤشر الدولار للذهب (يُتجاهل إن تعذر جلبه)
+    enable_market_hours_filter: bool = True  # عدم النشر أثناء إغلاق سوق الفوركس في العطلة
+    outcome_check_interval_seconds: int = 300  # متابعة الصفقات المفتوحة كل 5 دقائق
+
+    # TradingView webhook hardening (optional)
+    webhook_enforce_tv_ips: bool = False     # قبول طلبات عناوين TradingView الرسمية فقط
+    tradingview_heartbeat_minutes: int = 0   # 0 = معطل؛ تنبيه المسؤول إذا انقطعت تنبيهات TradingView
+
     # Webhook bridge
     webhook_host: str = "0.0.0.0"
     webhook_port: int = 8000

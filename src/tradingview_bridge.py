@@ -525,6 +525,11 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
             content=WebhookAck(status="delivery_failed", detail="alert stored but notification dispatch failed").model_dump(),
         )
 
+    blocked_reason = getattr(dispatch_results, "blocked_reason", None)
+    if blocked_reason:
+        _release_alert_fingerprint(fingerprint)
+        return WebhookAck(status="blocked_by_filters", detail=str(blocked_reason)[:300])
+
     if isinstance(dispatch_results, dict) and dispatch_results.get("duplicate"):
         return WebhookAck(
             status="duplicate_suppressed",

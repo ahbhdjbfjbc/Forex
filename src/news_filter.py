@@ -117,3 +117,50 @@ def check_news_status(settings: Settings | None = None) -> NewsStatus:
     if active_events:
         return NewsStatus(True, " | ".join(active_events[:3]), True)
     return NewsStatus(False, "", True)
+
+
+def currencies_for_symbol(symbol: str) -> set[str]:
+    """Currencies whose high-impact news moves the given instrument.
+
+    FX pairs map to their two legs; gold, silver and USD-quoted crypto are
+    driven mainly by USD releases (rates, CPI, NFP)."""
+    from src.symbol_resolver import instrument_type
+
+    text = "".join(ch for ch in str(symbol).upper() if ch.isalpha())
+    text = text.removesuffix("X") if str(symbol).upper().endswith("=X") else text
+    kind = instrument_type(str(symbol))
+    if kind != "FX":
+        return {"USD"}
+    legs = {text[:3], text[3:6]}
+    return {leg for leg in legs if leg in MAJOR_CURRENCIES} or set(MAJOR_CURRENCIES)
+
+
+def check_news_for_symbol(symbol: str, settings: Settings | None = None) -> NewsStatus:
+    """Like check_news_status, but only events for this instrument's currencies pause it.
+
+    Fails closed exactly like the global check: an unavailable or invalid
+    calendar pauses publication."""
+    settings = settings or get_settings()
+    status = check_news_status(settings)
+    if not status.is_paused or not status.data_available:
+        return status
+    relevant = currencies_for_symbol(symbol)
+    parts = [part for part in status.details.split(" | ") if part[1:4] in relevant]
+    if not parts:
+        # The global status only keeps the first three events; re-check the
+        # full calendar for this symbol's currencies before allowing.
+        events = _fetch_calendar_events() or []
+        buffer = timedelta(minutes=int(getattr(settings, "news_buffer_minutes", 30)))
+        now = datetime.now(timezone.utc)
+        for event in events:
+            if str(event.get("impact", "")).strip().lower() != "high":
+                continue
+            country = str(event.get("country", "")).strip().upper()
+            if country not in relevant:
+                continue
+            event_time = _parse_event_date(str(event.get("date", "")))
+            if event_time is not None and event_time - buffer <= now <= event_time + buffer:
+                parts.append(f"[{country}] {str(event.get('title', ''))[:160]}")
+    if parts:
+        return NewsStatus(True, " | ".join(parts[:3]), True)
+    return NewsStatus(False, "", True)
