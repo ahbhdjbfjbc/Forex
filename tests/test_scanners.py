@@ -491,6 +491,9 @@ class TestInstrumentAwareSignals:
 
     def test_metal_signal_uses_unit_sizing_not_fx_pips(self, settings):
         df = md.make_trend_pullback_bullish()  # regime/trigger shape only
+        # Gold intraday setups are session-filtered; end the synthetic series
+        # on a Wednesday 12:00 UTC bar (London/New York overlap).
+        df.index = pd.date_range(end="2026-11-04 12:00", periods=len(df), freq="1h", tz="UTC")
         metrics = _build_metrics(df)
         regime, confidence = classify_regime(metrics, settings)
         result = RegimeResult("XAUUSD", "1h", regime, metrics, confidence)

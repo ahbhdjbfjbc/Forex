@@ -83,3 +83,27 @@ def validate_gold_entry(
     else:
         return False, "اتجاه إشارة الذهب غير صالح"
     return True, "تم اجتياز فحص ATR ومستويات النطاق السابقة"
+
+
+# London open to New York afternoon (UTC). Gold liquidity and spreads are
+# typically worst in the late-US / early-Asia hours, so intraday gold setups
+# outside this window are skipped. 4h/1d bars span sessions and are exempt.
+GOLD_SESSION_START_UTC = 7
+GOLD_SESSION_END_UTC = 20
+_INTRADAY = {"1m", "3m", "5m", "15m", "30m", "45m", "1h", "2h"}
+
+
+def gold_session_allows(df: pd.DataFrame, timeframe: str) -> tuple[bool, str]:
+    """Allow intraday gold entries only when the latest bar is in London/New York hours."""
+    if str(timeframe).lower() not in _INTRADAY:
+        return True, "إطار زمني يتجاوز الجلسة الواحدة"
+    try:
+        stamp = pd.Timestamp(df.index[-1])
+    except (IndexError, TypeError, ValueError):
+        return False, "تعذر تحديد وقت آخر شمعة"
+    stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+    if stamp.weekday() >= 5:
+        return False, "عطلة نهاية الأسبوع"
+    if GOLD_SESSION_START_UTC <= stamp.hour < GOLD_SESSION_END_UTC:
+        return True, "داخل جلستي لندن/نيويورك"
+    return False, "خارج جلستي لندن ونيويورك (سيولة أضعف وسبريد أوسع)"

@@ -210,3 +210,35 @@ def test_outcome_records_candle_close_time_duration_and_fx_pips(tmp_path):
     assert "ساعة" in text
     assert "Bid/Ask" in text
     assert "وقف الخسارة" in text and "الهدف" in text
+
+
+def test_results_listing_summary_and_message_id(tmp_path):
+    store = SignalLifecycleStore(tmp_path / "state.sqlite3")
+    win = store.register_signal(make_signal(), entry_bar_id="b0")
+    loss = store.register_signal(make_signal(symbol="GBPUSD=X", direction=TradeDirection.SELL), entry_bar_id="b0")
+    open_one = store.register_signal(make_signal(symbol="AUDUSD=X"), entry_bar_id="b0")
+    store.set_telegram_message_id(win.signal_id, 4242)
+    assert store.telegram_message_id(win.signal_id) == 4242
+
+    store.observe_bar("EURUSD", "1h", high=1.1310, low=1.1150, close=1.1300, bar_id="b1")
+    store.observe_bar("GBPUSD", "1h", high=1.1110, low=1.0950, close=1.1080, bar_id="b1")
+
+    summary = store.performance_summary()
+    assert summary["active"] == 1
+    assert summary["closed"] == 2
+    assert summary["wins"] == 1 and summary["losses"] == 1
+    assert summary["win_rate_pct"] == 50.0
+    assert summary["total_r"] == pytest.approx(2.0)
+
+    rows = store.list_signals(limit=10)
+    assert {r["signal_id"] for r in rows} == {win.signal_id, loss.signal_id, open_one.signal_id}
+    assert store.count_signals() == 3
+    assert store.count_signals(include_active=False) == 2
+    closed = {r["signal_id"]: r for r in store.list_signals(limit=10, include_active=False)}
+    assert closed[loss.signal_id]["r_multiple"] == -1.0
+    assert closed[win.signal_id]["telegram_message_id"] == 4242
+
+    detail = store.get_signal(win.signal_id[:8])
+    assert detail is not None and detail["outcome"] == "TAKE_PROFIT_2"
+    assert store.get_signal("zz") is None
+    assert store.active_markets() == [("AUDUSD=X", "1h")]

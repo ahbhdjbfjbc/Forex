@@ -400,6 +400,30 @@ def _backup_current_params(params_path: Path | None = None) -> None:
     (BACKUPS_DIR / f"strategy_params_{ts}.json").write_text(params_path.read_text())
 
 
+def _record_strategy_version(
+    proposal_id: str,
+    strategy_name: str,
+    previous: dict[str, Any],
+    applied: dict[str, Any],
+    params_path: Path,
+) -> None:
+    """Append-only registry of every admin-approved production parameter change."""
+    try:
+        registry = Path(params_path).parent / "strategy_versions.jsonl"
+        entry = {
+            "applied_at": datetime.now(timezone.utc).isoformat(),
+            "proposal_id": proposal_id,
+            "strategy_name": strategy_name,
+            "previous_params": previous,
+            "applied_params": applied,
+            "params_sha256": hashlib.sha256(Path(params_path).read_bytes()).hexdigest(),
+        }
+        with registry.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("could not record strategy version (%s)", type(exc).__name__)
+
+
 def apply_proposal(proposal_id: str, params_path: Path | None = None) -> bool:
     """The explicit human-approval step: writes a previously-backtested
     proposal's parameters into `data/strategy_params.json` — backing up the
@@ -433,6 +457,7 @@ def apply_proposal(proposal_id: str, params_path: Path | None = None) -> bool:
 
     _backup_current_params(params_path)
     save_strategy_params(strategy_name, new_params, path=params_path)
+    _record_strategy_version(proposal_id, strategy_name, asdict(current), asdict(new_params), params_path)
     logger.info("applied proposal %s to %s: %s", proposal_id, strategy_name, proposal["param_overrides"])
     return True
 

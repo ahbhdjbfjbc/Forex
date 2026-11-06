@@ -20,7 +20,8 @@ import pandas as pd
 
 from config import Settings, get_settings
 from src import indicators as ind
-from src.gold_analysis import analyze_gold_market, validate_gold_entry
+from src.gold_analysis import analyze_gold_market, gold_session_allows, validate_gold_entry
+from src.market_structure import analyze_structure, structure_conflict
 from src.models import MarketRegime, RegimeResult, StrategyType, TradeDirection, TradeSignal
 from src.signal_quality import assess_signal_quality
 from src.symbol_resolver import instrument_type
@@ -108,7 +109,31 @@ def _validate_and_refine_signal(
                 logger.info("%s/%s: SELL rejected (bullish rejection wick)", regime_result.symbol, regime_result.timeframe)
                 return None
 
+        structure = analyze_structure(df, atr_val)
+        conflict = structure_conflict(
+            structure,
+            signal.direction.value,
+            counter_trend_strategy=signal.strategy == StrategyType.MEAN_REVERSION_FADE,
+        )
+        if conflict:
+            logger.info("%s/%s: signal rejected by market structure (%s)",
+                        regime_result.symbol, regime_result.timeframe, conflict)
+            return None
+
         if is_gold:
+            session_ok, session_reason = gold_session_allows(df, regime_result.timeframe)
+            if not session_ok:
+                logger.info("%s/%s: gold setup rejected (%s)",
+                            regime_result.symbol, regime_result.timeframe, session_reason)
+                return None
+            if (
+                signal.strategy == StrategyType.TREND_PULLBACK
+                and structure is not None
+                and structure.trend not in {"NEUTRAL", "BULLISH" if signal.direction == TradeDirection.BUY else "BEARISH"}
+            ):
+                logger.info("%s/%s: gold trend pullback rejected (structure trend %s)",
+                            regime_result.symbol, regime_result.timeframe, structure.trend)
+                return None
             gold_context = analyze_gold_market(df, atr_val)
             is_valid, reason = validate_gold_entry(
                 gold_context,
@@ -122,7 +147,12 @@ def _validate_and_refine_signal(
 
         return signal
     except Exception:
-        return signal
+        # Fail closed: a filter that cannot evaluate must never approve a trade.
+        logger.exception(
+            "%s/%s: signal validation failed; rejecting the setup",
+            regime_result.symbol, regime_result.timeframe,
+        )
+        return None
 
 
 def generate_signal(
@@ -165,6 +195,7 @@ def generate_signal(
             regime_result.metrics.atr,
             df,
             settings,
+            structure=analyze_structure(df, regime_result.metrics.atr),
         )
         if not quality.eligible:
             logger.info(

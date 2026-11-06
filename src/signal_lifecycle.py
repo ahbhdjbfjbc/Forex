@@ -105,6 +105,18 @@ def _parse_bar_datetime(value: str | None) -> datetime | None:
         return None
 
 
+def _current_strategy_version() -> str | None:
+    """Short fingerprint of the live strategy parameter file (for version comparison)."""
+    try:
+        import hashlib
+
+        from src.strategy_params import DEFAULT_PARAMS_PATH as PARAMS_PATH
+
+        return hashlib.sha256(Path(PARAMS_PATH).read_bytes()).hexdigest()[:12]
+    except Exception:
+        return None
+
+
 class SignalLifecycleStore:
     """SQLite-backed active-signal registry and one-shot outcome outbox."""
 
@@ -142,7 +154,9 @@ class SignalLifecycleStore:
                     opened_at TEXT,
                     close_bar_id TEXT,
                     quality_score INTEGER,
-                    quality_grade TEXT
+                    quality_grade TEXT,
+                    telegram_message_id INTEGER,
+                    strategy_version TEXT
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS one_active_signal_per_market
                     ON signals(market_key) WHERE status = 'ACTIVE';
@@ -176,6 +190,10 @@ class SignalLifecycleStore:
                 connection.execute("ALTER TABLE signals ADD COLUMN quality_score INTEGER")
             if "quality_grade" not in columns:
                 connection.execute("ALTER TABLE signals ADD COLUMN quality_grade TEXT")
+            if "telegram_message_id" not in columns:
+                connection.execute("ALTER TABLE signals ADD COLUMN telegram_message_id INTEGER")
+            if "strategy_version" not in columns:
+                connection.execute("ALTER TABLE signals ADD COLUMN strategy_version TEXT")
 
     def set_chart_assets(self, signal_id: str, image_path: str, source_data_path: str) -> bool:
         """Persist local chart/source references before any recommendation is sent."""
@@ -186,6 +204,25 @@ class SignalLifecycleStore:
                 (str(image_path), str(source_data_path), signal_id),
             )
             return cursor.rowcount == 1
+
+    def set_telegram_message_id(self, signal_id: str, message_id: int) -> None:
+        """Remember the channel message so the result can be posted as a reply to it."""
+        if not signal_id or not isinstance(message_id, int) or isinstance(message_id, bool):
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE signals SET telegram_message_id=? WHERE signal_id=?",
+                (int(message_id), signal_id),
+            )
+
+    def telegram_message_id(self, signal_id: str) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT telegram_message_id FROM signals WHERE signal_id=?", (signal_id,)
+            ).fetchone()
+        if row is None or row["telegram_message_id"] is None:
+            return None
+        return int(row["telegram_message_id"])
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30.0)
@@ -309,8 +346,8 @@ class SignalLifecycleStore:
                         signal_id, market_key, symbol, timeframe, direction, strategy,
                         entry_price, stop_loss, take_profit_1, take_profit_2,
                         entry_bar_id, last_evaluated_bar, source, status, opened_at,
-                        quality_score, quality_grade
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)""",
+                        quality_score, quality_grade, strategy_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?)""",
                     (
                         signal_id, key, symbol, timeframe, direction, strategy,
                         float(signal.entry_price), float(signal.stop_loss_price),
@@ -318,6 +355,7 @@ class SignalLifecycleStore:
                         entry_bar_id, entry_bar_id, source,
                         getattr(signal, "timestamp", datetime.now(timezone.utc)).isoformat(),
                         getattr(signal, "quality_score", None), getattr(signal, "quality_grade", None),
+                        _current_strategy_version(),
                     ),
                 )
             except sqlite3.IntegrityError:
@@ -475,6 +513,107 @@ class SignalLifecycleStore:
             )
             history.append(item)
         return history
+
+    _LIST_COLUMNS = (
+        "signal_id, symbol, timeframe, direction, strategy, source, status, entry_price, "
+        "stop_loss, take_profit_1, take_profit_2, exit_price, outcome, opened_at, closed_at, "
+        "entry_bar_id, close_bar_id, tp1_reached, quality_score, quality_grade, chart_path, "
+        "source_data_path, result_sent, strategy_version, telegram_message_id"
+    )
+
+    def _enrich(self, row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["r_multiple"] = None
+        item["points"] = None
+        item["points_unit"] = "pips" if instrument_type(item["symbol"]) == "FX" else "price units"
+        item["duration_seconds"] = None
+        if item.get("status") == "CLOSED":
+            outcome = self._outcome_from_row(row)
+            item["r_multiple"] = outcome.r_multiple
+            item["points"] = outcome.points
+            item["duration_seconds"] = outcome.duration_seconds
+        return item
+
+    def list_signals(self, *, limit: int = 10, offset: int = 0, include_active: bool = True) -> list[dict]:
+        """Published recommendations, newest first (cancelled/unsent drafts are excluded)."""
+        if not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        if not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        statuses = ("ACTIVE", "CLOSED") if include_active else ("CLOSED",)
+        placeholders = ",".join("?" for _ in statuses)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT {self._LIST_COLUMNS} FROM signals WHERE status IN ({placeholders}) "
+                "ORDER BY COALESCE(opened_at, closed_at) DESC, signal_id LIMIT ? OFFSET ?",
+                (*statuses, limit, offset),
+            ).fetchall()
+        return [self._enrich(row) for row in rows]
+
+    def count_signals(self, include_active: bool = True) -> int:
+        statuses = ("ACTIVE", "CLOSED") if include_active else ("CLOSED",)
+        placeholders = ",".join("?" for _ in statuses)
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) AS n FROM signals WHERE status IN ({placeholders})", statuses
+            ).fetchone()
+        return int(row["n"])
+
+    def get_signal(self, signal_id_prefix: str) -> dict | None:
+        """Look up one published recommendation by its full ID or a unique 6+ char prefix."""
+        prefix = str(signal_id_prefix or "").strip().lower()
+        if len(prefix) < 6 or not all(ch in "0123456789abcdef" for ch in prefix):
+            return None
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT {self._LIST_COLUMNS} FROM signals WHERE signal_id LIKE ? "
+                "AND status IN ('ACTIVE', 'CLOSED') LIMIT 2",
+                (prefix + "%",),
+            ).fetchall()
+        if len(rows) != 1:
+            return None
+        return self._enrich(rows[0])
+
+    def performance_summary(self) -> dict:
+        """Counts and realized R over every closed recommendation (nothing is hidden)."""
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM signals WHERE status='CLOSED'").fetchall()
+            active = connection.execute(
+                "SELECT COUNT(*) AS n FROM signals WHERE status='ACTIVE'"
+            ).fetchone()["n"]
+        wins = losses = ambiguous = reversed_count = 0
+        total_r = 0.0
+        for row in rows:
+            outcome = self._outcome_from_row(row)
+            if outcome.r_multiple is None:
+                ambiguous += 1
+                continue
+            total_r += outcome.r_multiple
+            if outcome.outcome == "REVERSED":
+                reversed_count += 1
+            if outcome.r_multiple > 0:
+                wins += 1
+            else:
+                losses += 1
+        resolved = wins + losses
+        return {
+            "active": int(active),
+            "closed": len(rows),
+            "wins": wins,
+            "losses": losses,
+            "ambiguous": ambiguous,
+            "reversed": reversed_count,
+            "win_rate_pct": round(100.0 * wins / resolved, 1) if resolved else None,
+            "total_r": round(total_r, 2),
+            "average_r": round(total_r / resolved, 3) if resolved else None,
+        }
+
+    def active_markets(self) -> list[tuple[str, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT symbol, timeframe FROM signals WHERE status='ACTIVE' ORDER BY symbol"
+            ).fetchall()
+        return [(str(row["symbol"]), str(row["timeframe"])) for row in rows]
 
     def pending_outcomes(self) -> list[SignalOutcome]:
         with self._connect() as connection:
