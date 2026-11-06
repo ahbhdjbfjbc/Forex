@@ -130,6 +130,8 @@ BTN_BTC = "₿ فحص البيتكوين (BTCUSD)"
 BTN_BOT_STATUS = "📊 حالة البوت والحساب"
 BTN_EVOLVE_MENU = "🧪 تطوير الاستراتيجيات"
 BTN_HELP = "📖 دليل الأوامر"
+BTN_RESULTS = "📈 نتائج الصفقات"
+RESULTS_PAGE_SIZE = 8
 
 _NO_TRADE_REASONS = {
     MarketRegime.LOW_LIQUIDITY_CHOP: (
@@ -160,6 +162,9 @@ _USAGE = (
     "• /watchlist — عرض وإدارة قائمة المراقبة التلقائية (حسب الفاصل المضبوط)\n"
     "• /add <الرمز> — إضافة زوج إلى قائمة الفحص التلقائي\n"
     "• /remove <الرمز> — حذف زوج من قائمة الفحص التلقائي\n"
+    "• /results — نتائج كل الصفقات (ربح/خسارة/مفتوحة) مع ملخص الأداء\n"
+    "• /trade <رقم> — تفاصيل صفقة واحدة مع صورة الشارت الأصلية\n"
+    "• /id — معرفة رقم حسابك في تيليجرام (لضبط TELEGRAM_ALLOWED_USER_ID)\n"
     "• /status — عرض حالة البوت والإعدادات وفلتر الأخبار\n"
     "• /channel_test — اختبار إرسال رسالة إلى القناة\n"
     "• /paper_status — عرض رصيد الحساب التجريبي (OANDA) والصفقات المفتوحة\n"
@@ -177,7 +182,11 @@ _TELEGRAM_COMMANDS = [
     ("watchlist", "عرض وإدارة قائمة المراقبة"),
     ("add", "إضافة زوج إلى قائمة المراقبة"),
     ("remove", "حذف زوج من قائمة المراقبة"),
+    ("results", "نتائج كل الصفقات وملخص الأداء"),
+    ("trade", "تفاصيل صفقة مع الشارت"),
     ("status", "عرض حالة البوت والإعدادات"),
+    ("channel_test", "اختبار النشر في القناة وصلاحيات البوت"),
+    ("id", "معرفة رقم حسابك في تيليجرام"),
     ("help", "عرض دليل الاستخدام"),
 ]
 
@@ -210,7 +219,7 @@ def _build_main_reply_keyboard():
         [KeyboardButton(BTN_QUICK_SCAN), KeyboardButton(BTN_SCAN_ALL)],
         [KeyboardButton(BTN_GOLD), KeyboardButton(BTN_BTC)],
         [KeyboardButton(BTN_WATCHLIST), KeyboardButton(BTN_BOT_STATUS)],
-        [KeyboardButton(BTN_EVOLVE_MENU), KeyboardButton(BTN_HELP)],
+        [KeyboardButton(BTN_RESULTS), KeyboardButton(BTN_EVOLVE_MENU), KeyboardButton(BTN_HELP)],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -535,6 +544,21 @@ def _is_authorized(update: Update, settings: Settings) -> bool:
     return False
 
 
+def _denial_hint(update: Update) -> str:
+    """Tell the sender their own numeric ID so the owner can configure it correctly."""
+    user = getattr(update, "effective_user", None)
+    chat = getattr(update, "effective_chat", None)
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        return ""
+    hint = f"\n\n🆔 رقم حسابك: {user_id}"
+    chat_type = getattr(chat, "type", "private")
+    if chat_type in {"group", "supergroup"}:
+        hint += f"\n💬 رقم هذه المجموعة: {getattr(chat, 'id', '')} (يجب أن يطابق TELEGRAM_CHAT_ID)"
+    hint += "\nإذا كنت المالك، ضع هذا الرقم في TELEGRAM_ALLOWED_USER_ID ثم أعد تشغيل الخدمة."
+    return hint
+
+
 async def _reply_target(update: Update):
     """يرجع الكائن المناسب للرد سواء كانت ضغطة زر أو رسالة عادية."""
     if getattr(update, "message", None) is not None:
@@ -569,6 +593,7 @@ async def _require_authorized(
         await target.reply_text(
             "⛔ وصل الأمر إلى البوت لكن هذا الحساب غير مخوّل. "
             "يلزم ضبط TELEGRAM_ALLOWED_USER_ID على رقم حساب المالك المصرّح به."
+            + _denial_hint(update)
         )
     return False
 
@@ -616,6 +641,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await msg_target.reply_text(
                 "⛔ لا تملك صلاحية استخدام لوحة البوت. يلزم ضبط "
                 "TELEGRAM_ALLOWED_USER_ID على رقم حساب المالك المصرّح به."
+                + _denial_hint(update)
             )
         return
     record_admin_action(
@@ -805,6 +831,19 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"💼 إدارة المخاطر: {settings.risk_percent_per_trade:g}% من رصيد ${settings.account_size_usd:,.0f}",
         "----------------------------------",
     ]
+    lines.append(await check_channel_permissions(getattr(context, "bot", None), settings))
+    try:
+        summary = await asyncio.to_thread(signal_lifecycle.performance_summary)
+        lines.append(_format_summary_line(summary))
+    except Exception as exc:
+        logger.warning("results summary unavailable for /status (%s)", type(exc).__name__)
+    try:
+        from src.tradingview_bridge import last_tradingview_alert_label
+
+        lines.append(f"📡 آخر تنبيه TradingView: {last_tradingview_alert_label()}")
+    except Exception:
+        pass
+    lines.append("----------------------------------")
     paper_text = await asyncio.to_thread(_format_paper_status, settings)
     lines.append(paper_text)
     lines.append("----------------------------------")
@@ -824,6 +863,8 @@ async def cmd_channel_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "------------------------------\n"
         f"{DEVELOPER_CREDIT}"
     )
+    permission_report = await check_channel_permissions(context.bot, settings)
+    await msg_target.reply_text(permission_report)
     res = await asyncio.to_thread(dispatch_message, test_msg, settings)
     if res.get("telegram"):
         await msg_target.reply_text("✅ تم إرسال رسالة الاختبار إلى القناة بنجاح!")
@@ -1027,6 +1068,19 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     data = query.data
 
+    if data.startswith("res:"):
+        try:
+            page = max(0, int(data.split(":", 1)[1]))
+        except ValueError:
+            page = 0
+        text, markup = await asyncio.to_thread(build_results_page, page)
+        await msg_target.reply_text(text, reply_markup=markup)
+        return
+
+    if data.startswith("trade:"):
+        await _send_trade_details(msg_target, data.split(":", 1)[1])
+        return
+
     if data.startswith("scan:"):
         symbol = _resolve_input_symbol(data.split(":", 1)[1])
         if symbol is None:
@@ -1168,7 +1222,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not update.message or not update.message.text:
         return
     if not _is_authorized(update, settings):
-        await update.message.reply_text("⚠️ غير مصرح لك باستخدام لوحة التحكم هذه.")
+        await update.message.reply_text(
+            "⚠️ غير مصرح لك باستخدام لوحة التحكم هذه." + _denial_hint(update)
+        )
         return
 
     text = update.message.text.strip()
@@ -1196,6 +1252,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if text == BTN_EVOLVE_MENU or "تطوير الاستراتيجيات" in text:
         context.args = []
         await cmd_evolve(update, context)
+        return
+    if text == BTN_RESULTS or "نتائج الصفقات" in text:
+        context.args = []
+        await cmd_results(update, context)
         return
     if text == BTN_HELP or "دليل الأوامر" in text:
         await cmd_start(update, context)
@@ -1233,6 +1293,215 @@ async def handle_telegram_error(update: object, context: ContextTypes.DEFAULT_TY
         logger.warning("could not report Telegram handler error (%s)", type(reply_error).__name__)
 
 
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Available to everyone: shows the sender's numeric ID (needed for setup)."""
+    settings = get_settings()
+    msg_target = await _reply_target(update)
+    user = getattr(update, "effective_user", None)
+    chat = getattr(update, "effective_chat", None)
+    if msg_target is None or user is None:
+        return
+    configured = str(getattr(settings, "telegram_allowed_user_id", "") or "").strip()
+    if not configured:
+        state = "⚠️ لم يُضبط TELEGRAM_ALLOWED_USER_ID بعد على الخادم."
+    elif configured == str(user.id):
+        state = "✅ هذا الحساب هو المالك المصرّح له."
+    else:
+        state = "⛔ هذا الحساب ليس المالك المضبوط في TELEGRAM_ALLOWED_USER_ID."
+    record_admin_action(getattr(user, "id", None), "/id", "info")
+    await msg_target.reply_text(
+        f"🆔 رقم حسابك في تيليجرام: {user.id}\n"
+        f"💬 رقم هذه المحادثة: {getattr(chat, 'id', '')}\n"
+        f"{state}"
+    )
+
+
+async def check_channel_permissions(bot, settings: Settings) -> str:
+    """Verify (read-only) that the bot is an admin allowed to post in the channel."""
+    target = str(getattr(settings, "telegram_channel_id", "") or settings.telegram_chat_id or "").strip()
+    if not target:
+        return "📢 القناة: لم يُضبط TELEGRAM_CHANNEL_ID ولا TELEGRAM_CHAT_ID."
+    if bot is None:
+        return "📢 القناة: تعذر الفحص (البوت غير متصل)."
+    try:
+        me = await bot.get_me()
+        member = await bot.get_chat_member(target, me.id)
+    except Exception as exc:
+        return (
+            f"📢 القناة {target}: تعذر التحقق ({type(exc).__name__}). "
+            "تأكد من صحة المعرف ومن إضافة البوت إلى القناة."
+        )
+    status = str(getattr(member, "status", ""))
+    if status == "creator":
+        return f"📢 القناة {target}: البوت مالك القناة ✅"
+    if status == "administrator":
+        if getattr(member, "can_post_messages", None) is False:
+            return f"📢 القناة {target}: البوت مشرف لكن بلا صلاحية نشر الرسائل ❌"
+        return f"📢 القناة {target}: البوت مشرف ويستطيع النشر ✅"
+    return f"📢 القناة {target}: البوت ليس مشرفاً (الحالة: {status or 'غير معروفة'}) ❌"
+
+
+_OUTCOME_LABELS = {
+    "TAKE_PROFIT_2": "✅ ربح (الهدف)",
+    "STOP_LOSS": "❌ خسارة (الوقف)",
+    "AMBIGUOUS": "⚠️ ملتبسة (الوقف والهدف بنفس الشمعة)",
+    "REVERSED": "🔄 أُغلقت بإشارة معاكسة",
+}
+
+
+def _outcome_label(row: dict) -> str:
+    if row.get("status") == "ACTIVE":
+        return "⏳ مفتوحة"
+    label = _OUTCOME_LABELS.get(str(row.get("outcome")), str(row.get("outcome")))
+    if row.get("outcome") == "REVERSED" and row.get("r_multiple") is not None:
+        label += " — ربح" if row["r_multiple"] > 0 else " — خسارة"
+    return label
+
+
+def _format_duration(seconds) -> str:
+    if seconds is None:
+        return "—"
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    parts = [f"{v} {u}" for v, u in ((days, "يوم"), (hours, "ساعة"), (minutes, "دقيقة")) if v]
+    return " ".join(parts) or "أقل من دقيقة"
+
+
+def _format_summary_line(summary: dict) -> str:
+    win_rate = f"{summary['win_rate_pct']:g}%" if summary.get("win_rate_pct") is not None else "—"
+    avg = f"{summary['average_r']:+g}R" if summary.get("average_r") is not None else "—"
+    return (
+        f"📈 النتائج: مغلقة {summary['closed']} | ربح {summary['wins']} | خسارة {summary['losses']} | "
+        f"ملتبسة {summary['ambiguous']} | مفتوحة {summary['active']}\n"
+        f"🎯 نسبة الربح الفعلية: {win_rate} | مجموع R: {summary['total_r']:+g} | متوسط: {avg}"
+    )
+
+
+def build_results_page(page: int = 0):
+    """Text + navigation keyboard for one page of recorded recommendations."""
+    summary = signal_lifecycle.performance_summary()
+    total = signal_lifecycle.count_signals()
+    rows = signal_lifecycle.list_signals(limit=RESULTS_PAGE_SIZE, offset=page * RESULTS_PAGE_SIZE)
+    lines = [
+        "📊 سجل نتائج الصفقات (كل التوصيات المنشورة — لا تُخفى أي خسارة)",
+        "----------------------------------",
+        _format_summary_line(summary),
+        "ℹ️ النتائج تقديرية من شموع OHLCV وليست تنفيذاً لدى وسيط؛ السبريد غير محتسب.",
+        "----------------------------------",
+    ]
+    if not rows:
+        lines.append("لا توجد صفقات مسجلة بعد. ستظهر هنا كل توصية تُنشر ونتيجتها.")
+    for row in rows:
+        r = f" | {row['r_multiple']:+g}R" if row.get("r_multiple") is not None else ""
+        points = (
+            f" | {row['points']:+g} {'نقطة' if row.get('points_unit') == 'pips' else 'وحدة سعر'}"
+            if row.get("points") is not None else ""
+        )
+        lines.append(
+            f"#{row['signal_id'][:8]} • {display_pair(str(row['symbol']).replace('=X', ''))} "
+            f"{str(row['timeframe']).upper()} {row['direction']}\n"
+            f"   {_outcome_label(row)}{r}{points}\n"
+            f"   فُتحت: {str(row.get('opened_at') or '')[:16].replace('T', ' ')} UTC"
+        )
+    pages = max(1, (total + RESULTS_PAGE_SIZE - 1) // RESULTS_PAGE_SIZE)
+    lines.append("----------------------------------")
+    lines.append(f"صفحة {page + 1} من {pages} — اضغط على رقم الصفقة لعرض التفاصيل والشارت.")
+    markup = None
+    if InlineKeyboardMarkup is not None and InlineKeyboardButton is not None:
+        buttons = [
+            [InlineKeyboardButton(f"🔎 #{row['signal_id'][:8]} {row['direction']}", callback_data=f"trade:{row['signal_id'][:16]}")]
+            for row in rows
+        ]
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ الأحدث", callback_data=f"res:{page - 1}"))
+        if page + 1 < pages:
+            nav.append(InlineKeyboardButton("الأقدم ➡️", callback_data=f"res:{page + 1}"))
+        if nav:
+            buttons.append(nav)
+        markup = InlineKeyboardMarkup(buttons) if buttons else None
+    return "\n".join(lines), markup
+
+
+def format_trade_details(row: dict) -> str:
+    def price(value):
+        return "—" if value is None else f"{float(value):g}"
+
+    lines = [
+        f"🧾 تفاصيل الصفقة #{row['signal_id'][:8]}",
+        f"📌 {display_pair(str(row['symbol']).replace('=X', ''))} — {str(row['timeframe']).upper()} — {row['direction']}",
+        f"🧠 الاستراتيجية: {row.get('strategy')} | المصدر: {row.get('source')}",
+        f"⭐ تقييم الشروط: {row.get('quality_score') or '—'}/100 {row.get('quality_grade') or ''}",
+        f"📍 الدخول: {price(row.get('entry_price'))}",
+        f"🛑 وقف الخسارة: {price(row.get('stop_loss'))}",
+        f"🎯 الهدف: {price(row.get('take_profit_2'))}",
+        f"🕒 الفتح: {str(row.get('opened_at') or '')[:19].replace('T', ' ')} UTC",
+        f"🏁 الحالة: {_outcome_label(row)}",
+    ]
+    if row.get("status") == "CLOSED":
+        unit = "نقطة" if row.get("points_unit") == "pips" else "وحدة سعر"
+        lines += [
+            f"🚪 سعر الخروج: {price(row.get('exit_price'))}",
+            f"🕒 الإغلاق: {str(row.get('closed_at') or '')[:19].replace('T', ' ')} UTC",
+            f"⏱️ المدة: {_format_duration(row.get('duration_seconds'))}",
+            f"📐 الحركة: {row['points']:+g} {unit}" if row.get("points") is not None else "📐 الحركة: غير محسوبة",
+            f"💰 المحصلة: {row['r_multiple']:+g}R" if row.get("r_multiple") is not None else "💰 المحصلة: غير محسوبة",
+        ]
+    if row.get("strategy_version"):
+        lines.append(f"🧬 نسخة الإعدادات: {row['strategy_version']}")
+    lines.append(f"🆔 {row['signal_id']}")
+    return "\n".join(lines)
+
+
+async def _send_trade_details(msg_target, prefix: str) -> None:
+    row = await asyncio.to_thread(signal_lifecycle.get_signal, prefix)
+    if row is None:
+        await msg_target.reply_text("⚠️ لم أجد صفقة بهذا الرقم. أرسل /results لعرض الأرقام.")
+        return
+    text = format_trade_details(row)
+    chart_path = row.get("chart_path")
+    if chart_path:
+        from pathlib import Path
+
+        path = Path(chart_path)
+        if path.is_file():
+            try:
+                with path.open("rb") as image:
+                    await msg_target.reply_photo(photo=image, caption=text[:1024])
+                return
+            except Exception as exc:
+                logger.warning("could not send stored chart (%s)", type(exc).__name__)
+    await msg_target.reply_text(text + "\n🖼️ صورة الشارت الأصلية غير متاحة على هذا الخادم.")
+
+
+async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = get_settings()
+    msg_target = await _reply_target(update)
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
+        return
+    args = list(getattr(context, "args", None) or [])
+    try:
+        page = max(0, int(args[0]) - 1) if args else 0
+    except ValueError:
+        page = 0
+    text, markup = await asyncio.to_thread(build_results_page, page)
+    await msg_target.reply_text(text, reply_markup=markup)
+
+
+async def cmd_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = get_settings()
+    msg_target = await _reply_target(update)
+    if not msg_target or not await _require_authorized(update, settings, msg_target):
+        return
+    args = list(getattr(context, "args", None) or [])
+    if not args:
+        await msg_target.reply_text("اكتب رقم الصفقة بعد الأمر، مثال: /trade 1a2b3c4d\nأو أرسل /results لعرض الأرقام.")
+        return
+    await _send_trade_details(msg_target, args[0].lstrip("#"))
+
+
 def build_telegram_application(settings: Settings | None = None) -> Application:
     if Application is None:
         raise RuntimeError(
@@ -1240,7 +1509,18 @@ def build_telegram_application(settings: Settings | None = None) -> Application:
             "install dependencies from requirements.txt."
         ) from _TELEGRAM_IMPORT_ERROR
     settings = settings or get_settings()
-    application = Application.builder().token(settings.telegram_bot_token).build()
+    # concurrent_updates: a slow /scan_all or /evolve must not block /start,
+    # /status or button presses from other updates (previously every update
+    # waited in one queue, which made the bot look unresponsive).
+    application = (
+        Application.builder()
+        .token(settings.telegram_bot_token)
+        .concurrent_updates(8)
+        .build()
+    )
+    application.add_handler(CommandHandler("id", cmd_id))
+    application.add_handler(CommandHandler("results", cmd_results))
+    application.add_handler(CommandHandler("trade", cmd_trade))
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("menu", cmd_start))
     application.add_handler(CommandHandler("help", cmd_start))

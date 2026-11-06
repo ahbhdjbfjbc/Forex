@@ -40,15 +40,19 @@ from src.notifier import (
     send_alert,
     send_news_pause_alert,
     send_news_resume_alert,
+    send_admin_message,
     send_no_signal_alert,
     send_signal_outcome,
 )
+from src.data_provider import OHLCVRequest, fetch_ohlcv
+from src.publish_gate import fx_market_open
+from src.symbol_resolver import instrument_type, to_yfinance_ticker
 from src.paper_executor import execute_paper_trade
 from src.scanner_1_regime import scan_symbols_with_data
 from src.scanner_2_strategy import generate_signal
 from src.signal_lifecycle import normalize_symbol, signal_lifecycle
 from src.telegram_bot import build_telegram_application, publish_telegram_command_menu
-from src.tradingview_bridge import app as webhook_app
+from src.tradingview_bridge import app as webhook_app, tradingview_heartbeat_ok
 from src.watchlist_store import watchlist_store
 from src.news_filter import NewsStatus, check_news_status
 from src.system_health import report_health
@@ -87,6 +91,43 @@ def _claim_auto_signal(signal, frame) -> tuple[str, ...] | None:
     return key
 
 
+_NEWS_STATE_FILE = "news_pause_state.json"
+
+
+def _save_news_pause_state() -> None:
+    """Persist the pause flags so a restart during news still sends the resume alert."""
+    try:
+        import json
+        from src.storage import get_data_dir
+
+        path = get_data_dir() / _NEWS_STATE_FILE
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "paused": bool(_is_paused_for_news),
+            "deferred": bool(_scan_deferred_by_news),
+        }), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:
+        logger.warning("could not persist news pause state (%s)", type(exc).__name__)
+
+
+def _load_news_pause_state() -> None:
+    global _is_paused_for_news, _scan_deferred_by_news
+    try:
+        import json
+        from src.storage import get_data_dir
+
+        path = get_data_dir() / _NEWS_STATE_FILE
+        if not path.is_file():
+            return
+        data = json.loads(path.read_text(encoding="utf-8"))
+        with _state_lock:
+            _is_paused_for_news = bool(data.get("paused"))
+            _scan_deferred_by_news = bool(data.get("deferred"))
+    except Exception as exc:
+        logger.warning("could not load news pause state (%s)", type(exc).__name__)
+
+
 def monitor_news_state(settings: Settings | None = None) -> bool:
     """يفحص حالة الأخبار كل دقيقة؛ يرسل تنبيه التوقف عند بدء الخبر،
     ويرسل تنبيه العودة الفورية للعمل فور انتهاء الخبر مباشرة."""
@@ -118,6 +159,7 @@ def monitor_news_state(settings: Settings | None = None) -> bool:
                 _is_paused_for_news = True
                 logger.warning("pausing bot due to high-impact news: %s", news_status.details)
                 send_news_pause_alert(news_status.details, settings)
+                _save_news_pause_state()
             return True
         else:
             if _is_paused_for_news:
@@ -127,6 +169,7 @@ def monitor_news_state(settings: Settings | None = None) -> bool:
                 if _scan_deferred_by_news:
                     _scan_deferred_by_news = False
                     should_run_deferred_scan = True
+                _save_news_pause_state()
 
     if should_run_deferred_scan:
         logger.info("running deferred scan cycle immediately after news clearance")
@@ -167,16 +210,19 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
         )
         return
 
+    fx_open = fx_market_open()
     expected_pairs = {
         (normalize_symbol(symbol), timeframe.lower())
         for symbol in symbols
         for timeframe in settings.timeframe_list
+        # During the weekend FX/metals close, stale data is expected and not an outage.
+        if fx_open or instrument_type(symbol) == "CRYPTO"
     }
     received_pairs = {
         (normalize_symbol(getattr(result, "symbol", "")), str(getattr(result, "timeframe", "")).lower())
         for result, _frame in regime_data
     }
-    market_healthy = bool(regime_data) and expected_pairs.issubset(received_pairs)
+    market_healthy = (bool(regime_data) or not expected_pairs) and expected_pairs.issubset(received_pairs)
     coverage = f"بيانات حديثة متاحة لـ {len(received_pairs & expected_pairs)}/{len(expected_pairs)} زوج/إطار."
     report_health("market_data", market_healthy, coverage, settings)
     signals_sent = 0
@@ -248,6 +294,40 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
         send_no_signal_alert(len(regime_data), settings)
 
 
+def monitor_open_signals(settings: Settings | None = None) -> int:
+    """Follow every open recommendation until TP/SL, independent of the hourly scan.
+
+    Runs every few minutes (and also during news pauses, which only stop new
+    publications) so results reach the channel close to when they happen.
+    Returns the number of outcomes found in this pass."""
+    settings = settings or get_settings()
+    found = 0
+    try:
+        flush_pending_signal_outcomes(settings)
+        markets = signal_lifecycle.active_markets()
+    except Exception:
+        logger.exception("open-signal monitor could not read the lifecycle store")
+        return 0
+    for symbol, timeframe in markets:
+        try:
+            frame = fetch_ohlcv(OHLCVRequest(symbol=to_yfinance_ticker(symbol), timeframe=timeframe, min_bars=30))
+            if frame is None or frame.empty:
+                continue
+            outcome = signal_lifecycle.observe_frame(symbol, timeframe, frame)
+            if outcome is not None:
+                found += 1
+                send_signal_outcome(outcome, settings)
+        except Exception:
+            logger.exception("open-signal monitor failed for %s/%s", symbol, timeframe)
+    try:
+        ok, detail = tradingview_heartbeat_ok(settings)
+        if detail != "disabled":
+            report_health("tradingview", ok, detail if not ok else "تنبيهات TradingView تصل بانتظام.", settings)
+    except Exception:
+        logger.exception("TradingView heartbeat check failed")
+    return found
+
+
 def build_scheduler(settings: Settings) -> BackgroundScheduler:
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(
@@ -255,6 +335,15 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
         "interval",
         seconds=settings.auto_scan_interval_seconds,
         id="forex_auto_scan_cycle",
+        kwargs={"settings": settings},
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        monitor_open_signals,
+        "interval",
+        seconds=max(60, int(getattr(settings, "outcome_check_interval_seconds", 300))),
+        id="forex_open_signal_monitor",
         kwargs={"settings": settings},
         max_instances=1,
         coalesce=True,
@@ -271,6 +360,92 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
     return scheduler
 
 
+_conflict_reported = False
+
+
+def _polling_error_callback(settings: Settings):
+    """Explain getUpdates failures instead of silently retrying forever."""
+
+    def _callback(exc: Exception) -> None:
+        global _conflict_reported
+        try:
+            from telegram.error import Conflict, InvalidToken
+        except ImportError:  # pragma: no cover - PTB is a hard dependency
+            Conflict = InvalidToken = ()  # type: ignore[assignment]
+        if Conflict and isinstance(exc, Conflict):
+            logger.error(
+                "Telegram polling conflict: another process is polling with the same "
+                "TELEGRAM_BOT_TOKEN (local PC, second Railway service or old deployment). "
+                "Only one instance may run, otherwise commands are answered randomly or not at all."
+            )
+            if not _conflict_reported:
+                _conflict_reported = True
+                threading.Thread(
+                    target=send_admin_message,
+                    args=(
+                        "⚠️ تعارض في البوت: توجد نسخة أخرى تعمل بنفس التوكن "
+                        "(جهاز محلي أو خدمة ثانية). أوقف النسخة الأخرى حتى تستجيب الأوامر.",
+                        settings,
+                    ),
+                    daemon=True,
+                ).start()
+            return
+        if InvalidToken and isinstance(exc, InvalidToken):
+            logger.error("Telegram rejected TELEGRAM_BOT_TOKEN; check the token in the deployment settings")
+            return
+        logger.warning("Telegram polling error (%s); PTB will retry", type(exc).__name__)
+
+    return _callback
+
+
+async def _notify_admin_startup(telegram_app, settings: Settings) -> None:
+    """Private admin message proving the bot is alive, with channel permissions."""
+    try:
+        from src.telegram_bot import check_channel_permissions
+
+        report = await check_channel_permissions(telegram_app.bot, settings)
+    except Exception as exc:
+        report = f"📢 تعذر فحص صلاحيات القناة ({type(exc).__name__})"
+    message = (
+        "✅ تم تشغيل بوت TONPO Signals وهو يستقبل الأوامر الآن.\n"
+        f"{report}\n"
+        "أرسل /status أو /results للتحقق."
+    )
+    await asyncio.to_thread(send_admin_message, message, settings)
+
+
+async def _start_telegram(settings: Settings):
+    """Start Telegram polling once; return the application or None on failure."""
+    telegram_app = build_telegram_application(settings)
+    try:
+        await telegram_app.initialize()
+        await publish_telegram_command_menu(telegram_app.bot)
+        await telegram_app.start()
+        await telegram_app.updater.start_polling(
+            allowed_updates=["message", "callback_query"],
+            # Keep user commands sent while the service was restarting. Dropping
+            # the queue made /start and other commands appear to be ignored.
+            drop_pending_updates=False,
+            error_callback=_polling_error_callback(settings),
+        )
+    except Exception as exc:
+        logger.error(
+            "Telegram bot could not start (%s: %s); the webhook keeps running and "
+            "the bot start will be retried", type(exc).__name__, str(exc)[:200],
+        )
+        for step in ("updater.stop", "stop", "shutdown"):
+            try:
+                target = telegram_app
+                for attr in step.split("."):
+                    target = getattr(target, attr)
+                await target()
+            except Exception:
+                pass
+        return None
+    logger.info("Telegram on-demand bot polling started")
+    return telegram_app
+
+
 async def _run_webhook_and_telegram(settings: Settings) -> None:
     config = uvicorn.Config(
         webhook_app,
@@ -280,19 +455,23 @@ async def _run_webhook_and_telegram(settings: Settings) -> None:
     )
     server = uvicorn.Server(config)
 
-    telegram_app = None
+    holder: dict[str, object] = {"app": None}
+    background: list[asyncio.Task] = []
     if settings.telegram_bot_token:
-        telegram_app = build_telegram_application(settings)
-        await telegram_app.initialize()
-        await publish_telegram_command_menu(telegram_app.bot)
-        await telegram_app.start()
-        await telegram_app.updater.start_polling(
-            allowed_updates=["message", "callback_query"],
-            # Keep user commands sent while the service was restarting. Dropping
-            # the queue made /start and other commands appear to be ignored.
-            drop_pending_updates=False,
-        )
-        logger.info("Telegram on-demand bot polling started")
+        holder["app"] = await _start_telegram(settings)
+
+        async def _retry_until_started() -> None:
+            delay = 15
+            while holder["app"] is None:
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 300)
+                holder["app"] = await _start_telegram(settings)
+            background.append(asyncio.create_task(_notify_admin_startup(holder["app"], settings)))
+
+        if holder["app"] is None:
+            background.append(asyncio.create_task(_retry_until_started()))
+        else:
+            background.append(asyncio.create_task(_notify_admin_startup(holder["app"], settings)))
     else:
         logger.warning(
             "TELEGRAM_BOT_TOKEN not set — Telegram command bot is disabled; "
@@ -302,10 +481,15 @@ async def _run_webhook_and_telegram(settings: Settings) -> None:
     try:
         await server.serve()
     finally:
+        for task in background:
+            task.cancel()
+        telegram_app = holder["app"]
         if telegram_app is not None:
-            await telegram_app.updater.stop()
-            await telegram_app.stop()
-            await telegram_app.shutdown()
+            for step in (telegram_app.updater.stop, telegram_app.stop, telegram_app.shutdown):
+                try:
+                    await step()
+                except Exception as exc:
+                    logger.warning("Telegram shutdown step failed (%s)", type(exc).__name__)
 
 
 def main() -> None:
@@ -315,6 +499,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    _load_news_pause_state()
     scheduler = build_scheduler(settings)
     scheduler.add_job(
         run_scan_cycle,

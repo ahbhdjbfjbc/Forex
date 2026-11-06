@@ -141,10 +141,10 @@ def test_telegram_polling_preserves_updates_received_during_restart(monkeypatch)
 
     asyncio.run(app._run_webhook_and_telegram(Settings(_env_file=None, telegram_bot_token="test-token")))
 
-    assert polling_calls == [{
-        "allowed_updates": ["message", "callback_query"],
-        "drop_pending_updates": False,
-    }]
+    assert len(polling_calls) == 1
+    assert polling_calls[0]["allowed_updates"] == ["message", "callback_query"]
+    assert polling_calls[0]["drop_pending_updates"] is False
+    assert callable(polling_calls[0]["error_callback"])
     assert "start" in published_commands
     assert "menu" in published_commands
     assert "scan" in published_commands

@@ -72,6 +72,48 @@ _REQUEST_RATE_MAX_CLIENTS = 4096
 _REQUESTS_BY_CLIENT: dict[str, deque[float]] = {}
 _REQUEST_RATE_LOCK = threading.Lock()
 
+# Published by TradingView for allowlisting webhook senders:
+# https://www.tradingview.com/support/solutions/43000529348-how-to-configure-webhook-alerts/
+# Enforcement is opt-in (WEBHOOK_ENFORCE_TV_IPS=true) because behind a hosting
+# proxy request.client.host is only the real sender when the ASGI server trusts
+# that proxy (uvicorn: FORWARDED_ALLOW_IPS).
+TRADINGVIEW_WEBHOOK_IPS = frozenset({"52.89.214.238", "34.212.75.30", "54.218.53.128", "52.32.178.7"})
+_LAST_ALERT_AT: datetime | None = None
+_LAST_ALERT_LOCK = threading.Lock()
+
+
+def _record_alert_received(now: datetime | None = None) -> None:
+    global _LAST_ALERT_AT
+    with _LAST_ALERT_LOCK:
+        _LAST_ALERT_AT = now or datetime.now(timezone.utc)
+
+
+def last_tradingview_alert_at() -> datetime | None:
+    with _LAST_ALERT_LOCK:
+        return _LAST_ALERT_AT
+
+
+def last_tradingview_alert_label() -> str:
+    stamp = last_tradingview_alert_at()
+    if stamp is None:
+        return "لم يصل أي تنبيه موثّق منذ آخر تشغيل"
+    minutes = int((datetime.now(timezone.utc) - stamp).total_seconds() // 60)
+    return f"{stamp.strftime('%Y-%m-%d %H:%M')} UTC (قبل {minutes} دقيقة)"
+
+
+def tradingview_heartbeat_ok(settings=None, now: datetime | None = None) -> tuple[bool, str]:
+    """Heartbeat for admins who expect regular TradingView alerts (0 = disabled)."""
+    settings = settings or get_settings()
+    minutes = int(getattr(settings, "tradingview_heartbeat_minutes", 0) or 0)
+    if minutes <= 0:
+        return True, "disabled"
+    stamp = last_tradingview_alert_at()
+    now = now or datetime.now(timezone.utc)
+    if stamp is None or (now - stamp).total_seconds() > minutes * 60:
+        return False, f"لم يصل تنبيه TradingView موثّق منذ أكثر من {minutes} دقيقة"
+    return True, "ok"
+
+
 DEFAULT_FALLBACK_SL_PIPS = 20.0  # FX fallback only
 # No standard pip convention exists for metals/crypto. Use conservative
 # price-relative fallback distances if TradingView omits stop_loss. These are
@@ -408,6 +450,9 @@ MAX_WEBHOOK_BODY_BYTES = 16 * 1024
 async def tradingview_webhook(request: Request) -> WebhookAck:
     # Reject abusive request rates before parsing the body or doing risk math.
     peer = request.client.host if request.client is not None else "unknown"
+    if getattr(get_settings(), "webhook_enforce_tv_ips", False) and peer not in TRADINGVIEW_WEBHOOK_IPS:
+        logger.warning("rejected webhook from a non-TradingView address")
+        raise HTTPException(status_code=403, detail="sender not allowed")
     _enforce_request_rate_limit(peer)
 
     # Bound input size before parsing; TradingView alerts are tiny JSON objects.
@@ -449,6 +494,7 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
         raise HTTPException(status_code=422, detail="invalid alert payload") from exc
 
     _verify_secret(alert.secret)
+    _record_alert_received()
     _validate_alert_time(alert)
     _strategy_for_alert(alert.strategy)
     if alert.signal != "NONE":
