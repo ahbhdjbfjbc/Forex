@@ -498,7 +498,8 @@ class SignalLifecycleStore:
                 """SELECT signal_id, symbol, timeframe, direction, strategy, source,
                           entry_price, stop_loss, take_profit_1, take_profit_2,
                           exit_price, outcome, closed_at, opened_at, tp1_reached,
-                          quality_score, quality_grade, chart_path, source_data_path
+                          quality_score, quality_grade, chart_path, source_data_path,
+                          strategy_version
                    FROM signals WHERE status='CLOSED' ORDER BY closed_at DESC LIMIT ?""",
                 (limit,),
             ).fetchall()

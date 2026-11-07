@@ -19,6 +19,42 @@ _PROMPT_VERSION = "closed-outcome-review-v1"
 _REPORT_LOCK = threading.Lock()
 
 
+def _session_of(row: dict) -> str:
+    """Trading session of the recommendation's open time (UTC hour buckets)."""
+    from datetime import datetime
+
+    try:
+        hour = datetime.fromisoformat(str(row.get("opened_at")).replace("Z", "+00:00")).hour
+    except (TypeError, ValueError):
+        return "unknown"
+    if 7 <= hour < 12:
+        return "london"
+    if 12 <= hour < 16:
+        return "london_newyork_overlap"
+    if 16 <= hour < 21:
+        return "newyork"
+    return "asia"
+
+
+def _breakdown(rows: list[dict], key) -> list[dict]:
+    """Resolved-trade counts and average R per group; no group is hidden."""
+    groups: dict[str, list[float]] = {}
+    for row in rows:
+        if row.get("r_multiple") is None:
+            continue
+        groups.setdefault(key(row), []).append(float(row["r_multiple"]))
+    return [
+        {
+            "group": group,
+            "trades": len(rs),
+            "wins": sum(value > 0 for value in rs),
+            "win_rate_pct": round(100 * sum(value > 0 for value in rs) / len(rs), 2),
+            "average_r": round(sum(rs) / len(rs), 3),
+        }
+        for group, rs in sorted(groups.items())
+    ]
+
+
 def _stats(rows: list[dict]) -> dict:
     grouped: dict[str, list[dict]] = {}
     for row in rows:
@@ -44,6 +80,17 @@ def _stats(rows: list[dict]) -> dict:
             ),
         })
     return {
+        "breakdowns": {
+            dimension: _breakdown(rows, key)
+            for dimension, key in (
+                ("symbol", lambda r: str(r.get("symbol", "unknown")).upper().replace("=X", "")),
+                ("timeframe", lambda r: str(r.get("timeframe", "unknown")).lower()),
+                ("direction", lambda r: str(r.get("direction", "unknown"))),
+                ("session_utc", _session_of),
+                ("quality_grade", lambda r: str(r.get("quality_grade") or "none")),
+                ("strategy_version", lambda r: str(r.get("strategy_version") or "unknown")),
+            )
+        },
         "closed_signals": len(rows),
         "resolved_signals": sum(row.get("r_multiple") is not None for row in rows),
         "ambiguous_signals": sum(row.get("r_multiple") is None for row in rows),
@@ -83,6 +130,18 @@ def _local_report(stats: dict) -> str:
                 f"{item['non_wins']} غير رابحة، متوسط {item['average_r']:+g}R، "
                 f"عامل ربح {pf}، متوسط تقييم الشروط {item['mean_quality_score']}"
             )
+        labels = {
+            "symbol": "حسب الرمز", "timeframe": "حسب الإطار", "direction": "حسب الاتجاه",
+            "session_utc": "حسب الجلسة", "quality_grade": "حسب درجة التقييم",
+            "strategy_version": "حسب نسخة الإعدادات",
+        }
+        for dimension, groups in stats.get("breakdowns", {}).items():
+            if not groups:
+                continue
+            parts = ", ".join(
+                f"{g['group']}: {g['trades']} صفقة/{g['win_rate_pct']:g}%/{g['average_r']:+g}R" for g in groups[:8]
+            )
+            lines.append(f"• {labels.get(dimension, dimension)}: {parts}")
         if count < 30:
             lines.append("العينة صغيرة (<30): لا تُعامل الإحصاءات كدليل تنبؤي ولا تستنتج أفضلية مستقرة.")
         else:
