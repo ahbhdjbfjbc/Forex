@@ -47,3 +47,57 @@ def test_start_answers_while_slow_scan_is_running(monkeypatch, tmp_path):
     id_reply = next((at, chat, text) for at, chat, text in fake.sent if "رقم حسابك" in text)
     assert start_reply < 1.0 < scan_reply, sent
     assert id_reply[1] == 555 and "555" in id_reply[2]
+
+
+@pytest.mark.parametrize(
+    ("scan_result", "expected_reply"),
+    [
+        (
+            "🎯 التوصية: دخول صفقة BUY\n"
+            "📍 سعر الدخول: 1.08500\n"
+            "🛑 وقف الخسارة: 1.08000\n"
+            "🎯 الهدف الوحيد: 1.09500",
+            "اكتمل التحليل",
+        ),
+        (RuntimeError("market data unavailable"), "تعذر إكمال الفحص"),
+    ],
+)
+def test_private_scan_is_safe_and_never_silent(monkeypatch, scan_result, expected_reply):
+    import telegram.ext as ext
+    from src import telegram_bot as bot
+
+    settings = Settings(
+        _env_file=None,
+        telegram_bot_token="123:abc",
+        telegram_allowed_user_id="111",
+    )
+    monkeypatch.setattr(bot, "get_settings", lambda: settings)
+    def run_scan(*_args, **_kwargs):
+        if isinstance(scan_result, Exception):
+            raise scan_result
+        return scan_result
+
+    monkeypatch.setattr(bot, "run_on_demand_scan", run_scan)
+    fake = FakeTelegram([msg_update(10, "/scan EURUSD")])
+    original_build = ext.ApplicationBuilder.build
+
+    def build(self):
+        self.request(fake).get_updates_request(fake)
+        return original_build(self)
+
+    monkeypatch.setattr(ext.ApplicationBuilder, "build", build)
+
+    async def run():
+        app = bot.build_telegram_application(settings)
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(poll_interval=0.05)
+        await asyncio.sleep(0.8)
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+
+    asyncio.run(run())
+    replies = [text for _, chat, text in fake.sent if chat == 111]
+    assert any(expected_reply in text for text in replies)
+    assert not any("1.08500" in text or "1.08000" in text or "1.09500" in text for text in replies)

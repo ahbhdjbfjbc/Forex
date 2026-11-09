@@ -449,6 +449,35 @@ def run_on_demand_scan(raw_text: str, settings: Settings | None = None) -> str:
     return _format_no_trade_report(symbol, effective_primary_tf, scanned_tfs, regime_result)
 
 
+def _hide_trade_details_in_command_reply(report: str) -> str:
+    """Keep command chats responsive while reserving full signals for the signal channel."""
+    if "🎯 التوصية: دخول صفقة" in report:
+        return (
+            "✅ اكتمل التحليل ووجد النظام مرشحاً مستوفياً للشروط الأولية.\n"
+            "🔒 لا تُعرض تفاصيل الدخول والوقف والهدف في محادثة الأوامر؛ "
+            "استخدم زر الإرسال الصريح لنشر التوصية المصورة في قناة الإشارات فقط."
+        )
+    if "🎯 التوصيات والفرص المكتملة:" in report:
+        return (
+            "✅ اكتمل الفحص الشامل. تفاصيل التوصيات لا تُكرر في محادثة الأوامر؛ "
+            "التوصية التي تجتاز البوابات تُرسل بصورة إلى قناة الإشارات المحددة فقط.\n"
+            "📈 أرسل /results لمتابعة النتائج المسجلة."
+        )
+    return report
+
+
+async def _run_scan_in_worker(scan_function, *args, operation: str) -> str:
+    """Run market work off-loop and convert unexpected failures into a visible reply."""
+    try:
+        return await asyncio.to_thread(scan_function, *args)
+    except Exception as exc:
+        logger.exception("Telegram %s failed; returning a user-facing scan error", operation)
+        return (
+            "⚠️ تعذر إكمال الفحص بسبب خطأ مؤقت في جلب البيانات أو تحليلها "
+            f"({type(exc).__name__}). تحقق من /status و/results، ثم حاول لاحقاً."
+        )
+
+
 def run_full_watchlist_scan(settings: Settings | None = None) -> str:
     """يفحص جميع أزواج قائمة المراقبة دفعة واحدة ويرجع تقريراً شاملاً بالعربية."""
     settings = settings or get_settings()
@@ -612,7 +641,9 @@ async def _handle_scan_request(update: Update, settings: Settings, raw_text: str
             f"⏳ جاري فحص {display_pair(symbol)} وتحليل المؤشرات الفنية بدقة..."
         )
 
-    report = await asyncio.to_thread(run_on_demand_scan, raw_text, settings)
+    report = await _run_scan_in_worker(
+        run_on_demand_scan, raw_text, settings, operation="on-demand scan"
+    )
     has_signal = "🎯 التوصية: دخول صفقة" in report
     reply_markup = (
         _build_report_action_keyboard(symbol, has_signal)
@@ -626,7 +657,7 @@ async def _handle_scan_request(update: Update, settings: Settings, raw_text: str
         except Exception:
             pass
 
-    await msg_target.reply_text(report, reply_markup=reply_markup)
+    await msg_target.reply_text(_hide_trade_details_in_command_reply(report), reply_markup=reply_markup)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -678,12 +709,17 @@ async def cmd_scan_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     wait_msg = await msg_target.reply_text(
         "🚀 جاري إجراء فحص شامل لجميع الأزواج في قائمة المراقبة... يرجى الانتظار لحظات."
     )
-    report = await asyncio.to_thread(run_full_watchlist_scan, settings)
+    report = await _run_scan_in_worker(
+        run_full_watchlist_scan, settings, operation="full watchlist scan"
+    )
     try:
         await wait_msg.delete()
     except Exception:
         pass
-    await msg_target.reply_text(report, reply_markup=_build_quick_scan_inline_keyboard())
+    await msg_target.reply_text(
+        _hide_trade_details_in_command_reply(report),
+        reply_markup=_build_quick_scan_inline_keyboard(),
+    )
 
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -859,13 +895,18 @@ async def cmd_channel_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     test_msg = (
         "✅ رسالة اختبار من بوت توصيات الفوركس\n"
-        f"تم ربط البوت بالقناة بنجاح، وستصل التوصيات وتنبيهات الأخبار وحالة السوق هنا تلقائياً كل {settings.auto_scan_interval_label_ar}.\n"
+        "هذه قناة نشر الإشارات ونتائجها؛ تنبيهات الأعطال والأخبار تصل للأدمن على الخاص.\n"
         "------------------------------\n"
         f"{DEVELOPER_CREDIT}"
     )
     permission_report = await check_channel_permissions(context.bot, settings)
     await msg_target.reply_text(permission_report)
-    res = await asyncio.to_thread(dispatch_message, test_msg, settings)
+    res = await asyncio.to_thread(
+        dispatch_message,
+        test_msg,
+        settings,
+        target_chat_id=str(getattr(settings, "telegram_channel_id", "") or "").strip(),
+    )
     if res.get("telegram"):
         await msg_target.reply_text("✅ تم إرسال رسالة الاختبار إلى القناة بنجاح!")
     else:
@@ -1087,10 +1128,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await msg_target.reply_text("⚠️ رمز الزوج في زر الفحص غير صالح.")
             return
         await msg_target.reply_text(f"⏳ جاري فحص {display_pair(symbol)}...")
-        report = await asyncio.to_thread(run_on_demand_scan, symbol, settings)
+        report = await _run_scan_in_worker(
+            run_on_demand_scan, symbol, settings, operation="button scan"
+        )
         has_signal = "🎯 التوصية: دخول صفقة" in report
         await msg_target.reply_text(
-            report, reply_markup=_build_report_action_keyboard(symbol, has_signal)
+            _hide_trade_details_in_command_reply(report),
+            reply_markup=_build_report_action_keyboard(symbol, has_signal),
         )
 
     elif data.startswith("pub:"):
@@ -1195,8 +1239,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif data == "action:scan_all":
         await msg_target.reply_text("🚀 جاري فحص جميع الأزواج في قائمة المراقبة...")
-        report = await asyncio.to_thread(run_full_watchlist_scan, settings)
-        await msg_target.reply_text(report, reply_markup=_build_quick_scan_inline_keyboard())
+        report = await _run_scan_in_worker(
+            run_full_watchlist_scan, settings, operation="button full scan"
+        )
+        await msg_target.reply_text(
+            _hide_trade_details_in_command_reply(report),
+            reply_markup=_build_quick_scan_inline_keyboard(),
+        )
 
     elif data == "action:watchlist":
         symbols = watchlist_store.get_all()
@@ -1317,14 +1366,15 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def check_channel_permissions(bot, settings: Settings) -> str:
-    """Verify (read-only) that the bot is an admin allowed to post in the channel."""
-    target = str(getattr(settings, "telegram_channel_id", "") or settings.telegram_chat_id or "").strip()
+    """Verify read-only posting access for the explicit signal channel or group."""
+    target = str(getattr(settings, "telegram_channel_id", "") or "").strip()
     if not target:
-        return "📢 القناة: لم يُضبط TELEGRAM_CHANNEL_ID ولا TELEGRAM_CHAT_ID."
+        return "📢 وجهة الإشارات: لم يُضبط TELEGRAM_CHANNEL_ID."
     if bot is None:
         return "📢 القناة: تعذر الفحص (البوت غير متصل)."
     try:
         me = await bot.get_me()
+        chat = await bot.get_chat(target)
         member = await bot.get_chat_member(target, me.id)
     except Exception as exc:
         return (
@@ -1333,12 +1383,14 @@ async def check_channel_permissions(bot, settings: Settings) -> str:
         )
     status = str(getattr(member, "status", ""))
     if status == "creator":
-        return f"📢 القناة {target}: البوت مالك القناة ✅"
+        return f"📢 وجهة الإشارات {target}: البوت مالكها ✅"
     if status == "administrator":
-        if getattr(member, "can_post_messages", None) is False:
-            return f"📢 القناة {target}: البوت مشرف لكن بلا صلاحية نشر الرسائل ❌"
-        return f"📢 القناة {target}: البوت مشرف ويستطيع النشر ✅"
-    return f"📢 القناة {target}: البوت ليس مشرفاً (الحالة: {status or 'غير معروفة'}) ❌"
+        if getattr(chat, "type", "") in {"group", "supergroup"}:
+            return f"📢 وجهة الإشارات {target}: البوت مشرف في المجموعة ويستطيع النشر ✅"
+        if getattr(member, "can_post_messages", None) is not True:
+            return f"📢 وجهة الإشارات {target}: تعذر إثبات صلاحية نشر الرسائل للمشرف ❌"
+        return f"📢 وجهة الإشارات {target}: البوت مشرف ويستطيع النشر ✅"
+    return f"📢 وجهة الإشارات {target}: البوت ليس مشرفاً (الحالة: {status or 'غير معروفة'}) ❌"
 
 
 _OUTCOME_LABELS = {

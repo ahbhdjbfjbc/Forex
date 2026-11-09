@@ -71,7 +71,7 @@ def test_telegram_photo_uses_single_sendphoto_and_checks_api_ack(tmp_path, monke
     image = tmp_path / "chart.png"
     image.write_bytes(b"png")
     settings = Settings(
-        _env_file=None, telegram_bot_token="token", telegram_chat_id="-100123", telegram_channel_id=""
+        _env_file=None, telegram_bot_token="token", telegram_chat_id="111", telegram_channel_id="-100123"
     )
     sent = {}
 

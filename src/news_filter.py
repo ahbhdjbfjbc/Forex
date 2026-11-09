@@ -106,7 +106,12 @@ def check_news_status(settings: Settings | None = None) -> NewsStatus:
             continue
         event_time = _parse_event_date(str(event.get("date", "")))
         if event_time is None:
-            continue
+            logger.warning("economic calendar contains a high-impact event with an invalid date")
+            return NewsStatus(
+                is_paused=True,
+                details="بيانات خبر عالي التأثير في التقويم غير مكتملة؛ تم إيقاف التوصيات احترازياً.",
+                data_available=False,
+            )
         if event_time - window <= now <= event_time + window:
             remaining = int(round((event_time - now).total_seconds() / 60))
             time_desc = f"يصدر بعد {remaining} دقيقة" if remaining > 0 else (

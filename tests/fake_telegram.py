@@ -29,6 +29,8 @@ class FakeTelegram(BaseRequest):
                  "can_delete_messages": True, "can_manage_video_chats": True, "can_restrict_members": True,
                  "can_promote_members": False, "can_change_info": True, "can_invite_users": True,
                  "can_post_stories": True, "can_edit_stories": True, "can_delete_stories": True}
+        elif name == "getChat":
+            r = {"id": int(params.get("chat_id", 1)), "type": "supergroup", "title": "Signals"}
         else:
             r = True
         return 200, json.dumps({"ok": True, "result": r}).encode()

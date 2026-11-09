@@ -23,9 +23,7 @@ def test_applescript_message_escaping_removes_statement_breaks() -> None:
     assert "\\\\tail" in escaped
 
 
-def test_send_alert_isolates_adapter_exceptions_and_does_not_log_exception_text(monkeypatch, caplog) -> None:
-    monkeypatch.setattr(notifier, "format_message", lambda _signal: "test signal")
-
+def test_dispatch_message_isolates_adapter_exceptions_and_does_not_log_exception_text(monkeypatch, caplog) -> None:
     def broken(_message, _settings):
         raise RuntimeError("credential-url-secret-must-not-be-logged")
 
@@ -33,10 +31,23 @@ def test_send_alert_isolates_adapter_exceptions_and_does_not_log_exception_text(
     monkeypatch.setattr(notifier, "send_discord", lambda _message, _settings: True)
     monkeypatch.setattr(notifier, "send_desktop", lambda _message, _settings: False)
 
-    results = notifier.send_alert(object(), Settings(_env_file=None))
+    results = notifier.dispatch_message("test signal", Settings(_env_file=None))
 
     assert results == {"telegram": False, "discord": True, "desktop": False}
     assert "credential-url-secret-must-not-be-logged" not in caplog.text
+
+
+def test_send_alert_refuses_untyped_payload_without_dispatching(monkeypatch) -> None:
+    monkeypatch.setattr(
+        notifier,
+        "dispatch_message",
+        lambda *_args, **_kwargs: pytest.fail("untyped payload must not bypass the publish gate"),
+    )
+
+    result = notifier.send_alert(object(), Settings(_env_file=None))
+
+    assert result.blocked_reason == "رفض النشر: نوع بيانات التوصية غير صالح"
+    assert result == {"telegram": False, "discord": False, "desktop": False, "duplicate": False}
 
 
 def test_strategy_params_invalid_root_falls_back_to_defaults(tmp_path: Path) -> None:

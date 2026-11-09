@@ -155,8 +155,18 @@ def _get_target_telegram_id(settings: Settings) -> str:
     return str(settings.telegram_chat_id).strip()
 
 
-def send_telegram(message: str, settings: Settings, *, reply_to_message_id: int | None = None) -> bool:
-    target_chat_id = _get_target_telegram_id(settings)
+def send_telegram(
+    message: str,
+    settings: Settings,
+    *,
+    reply_to_message_id: int | None = None,
+    target_chat_id: str | None = None,
+) -> bool:
+    target_chat_id = (
+        _get_target_telegram_id(settings)
+        if target_chat_id is None
+        else str(target_chat_id).strip()
+    )
     if not settings.telegram_bot_token or not target_chat_id:
         logger.debug("telegram not configured, skipping")
         return False
@@ -183,10 +193,12 @@ def send_telegram(message: str, settings: Settings, *, reply_to_message_id: int 
 
 def send_telegram_photo(caption: str, image_path: str | Path, settings: Settings) -> bool:
     """Send the recommendation and its chart in one Telegram sendPhoto call."""
-    target_chat_id = _get_target_telegram_id(settings)
+    # Signals only go to the explicitly configured broadcast channel. Never
+    # fall back to the admin's private or command-control chat.
+    target_chat_id = str(getattr(settings, "telegram_channel_id", "") or "").strip()
     path = Path(image_path)
     if not settings.telegram_bot_token or not target_chat_id or not path.is_file():
-        logger.warning("telegram photo delivery unavailable (configuration or chart missing)")
+        logger.warning("telegram signal-channel delivery unavailable (channel or chart missing)")
         return False
     if path.stat().st_size > 8 * 1024 * 1024:
         logger.warning("telegram photo rejected because chart exceeds the configured size limit")
@@ -283,7 +295,11 @@ def send_desktop(message: str, settings: Settings) -> bool:
 
 
 def dispatch_message(
-    message: str, settings: Settings | None = None, *, reply_to_message_id: int | None = None
+    message: str,
+    settings: Settings | None = None,
+    *,
+    reply_to_message_id: int | None = None,
+    target_chat_id: str | None = None,
 ) -> dict[str, bool]:
     """يرسل أي رسالة نصية (توصية أو تنبيه حالة) إلى جميع القنوات المفعلة بأمان."""
     settings = settings or get_settings()
@@ -291,8 +307,13 @@ def dispatch_message(
 
     def telegram(text: str, cfg: Settings) -> bool:
         if reply_to_message_id:
-            return send_telegram(text, cfg, reply_to_message_id=reply_to_message_id)
-        return send_telegram(text, cfg)
+            return send_telegram(
+                text,
+                cfg,
+                reply_to_message_id=reply_to_message_id,
+                target_chat_id=target_chat_id,
+            )
+        return send_telegram(text, cfg, target_chat_id=target_chat_id)
 
     channels = (
         ("telegram", telegram),
@@ -376,11 +397,25 @@ def send_signal_outcome(
         original_message_id = None
     if original_message_id:
         results = dispatch_message(
-            format_signal_outcome(outcome), settings, reply_to_message_id=original_message_id
+            format_signal_outcome(outcome),
+            settings,
+            reply_to_message_id=original_message_id,
+            target_chat_id=str(
+                getattr(settings or get_settings(), "telegram_channel_id", "") or ""
+            ).strip(),
         )
     else:
-        results = dispatch_message(format_signal_outcome(outcome), settings)
-    if any(results.values()):
+        results = dispatch_message(
+            format_signal_outcome(outcome),
+            settings,
+            target_chat_id=str(
+                getattr(settings or get_settings(), "telegram_channel_id", "") or ""
+            ).strip(),
+        )
+    # If the original signal was posted to Telegram, a Discord/desktop success
+    # is not enough: keep the outcome pending until Telegram accepts the reply.
+    delivered = bool(results.get("telegram")) if original_message_id else any(results.values())
+    if delivered:
         signal_lifecycle.mark_outcome_sent(outcome.signal_id)
     return results
 
@@ -402,8 +437,10 @@ def send_alert(
     """Publish a new active idea once; duplicates stay silent until setup reset or exit."""
     settings = settings or get_settings()
     if not isinstance(signal, TradeSignal):
-        # Retain the simple formatter/dispatcher contract for adapters and tests.
-        return dispatch_message(format_message(signal), settings)
+        logger.warning("refusing to publish a non-TradeSignal value through send_alert")
+        blocked = DeliveryResult(telegram=False, discord=False, desktop=False, duplicate=False)
+        blocked.blocked_reason = "رفض النشر: نوع بيانات التوصية غير صالح"
+        return blocked
 
     if market_frame is None:
         logger.warning("refusing to publish %s/%s without its analyzed OHLCV frame", signal.symbol, signal.timeframe)
@@ -489,12 +526,20 @@ def send_no_signal_alert(
 def send_news_pause_alert(
     news_details: str = "", settings: Settings | None = None
 ) -> dict[str, bool]:
-    """يرسل تنبيهاً للقناة عند توقف البوت مؤقتاً بسبب الأخبار الاقتصادية."""
+    """يرسل تنبيهاً خاصاً للأدمن عند توقف التوصيات، لا إلى قناة الإشارات."""
+    settings = settings or get_settings()
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    lines = [
-        "🛑 تنبيه هام: توقف مؤقت للبوت بسبب الأخبار 🛑",
-        "📰 السبب: رصد أخبار اقتصادية قوية مؤثرة على حركة السوق حالياً.",
-    ]
+    feed_unavailable = not news_details or news_details.startswith(("تعذر التحقق", "بيانات خبر"))
+    if feed_unavailable:
+        lines = [
+            "🛑 تنبيه: أُوقفت التوصيات مؤقتاً لتعذر التحقق من تقويم الأخبار 🛑",
+            "📰 السبب: لا يمكن تأكيد حالة الأخبار من المصدر الحالي؛ هذا لا يعني أن خبراً محدداً قد رُصد.",
+        ]
+    else:
+        lines = [
+            "🛑 تنبيه هام: توقف مؤقت للتوصيات بسبب خبر مؤثر 🛑",
+            "📰 السبب: رُصد خبر اقتصادي قوي ضمن نافذة الحماية.",
+        ]
     if news_details:
         lines.append(f"📌 تفاصيل الخبر: {news_details}")
     lines.extend([
@@ -503,11 +548,13 @@ def send_news_pause_alert(
         "------------------------------",
         f"🕒 الوقت: {now_str} بتوقيت UTC",
     ])
-    return dispatch_message("\n".join(lines), settings)
+    sent = send_admin_message("\n".join(lines), settings)
+    return {"telegram": bool(sent), "discord": False, "desktop": False}
 
 
 def send_news_resume_alert(settings: Settings | None = None) -> dict[str, bool]:
     """يرسل تنبيهاً للقناة فور انتهاء الأخبار وعودة البوت للعمل."""
+    settings = settings or get_settings()
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "✅ تنبيه: عودة البوت للعمل تلقائياً ✅",
@@ -516,4 +563,5 @@ def send_news_resume_alert(settings: Settings | None = None) -> dict[str, bool]:
         "------------------------------",
         f"🕒 الوقت: {now_str} بتوقيت UTC",
     ]
-    return dispatch_message("\n".join(lines), settings)
+    sent = send_admin_message("\n".join(lines), settings)
+    return {"telegram": bool(sent), "discord": False, "desktop": False}

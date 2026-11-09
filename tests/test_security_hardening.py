@@ -1,8 +1,10 @@
 """Regression tests for security and configuration hardening."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -10,7 +12,7 @@ import pytest
 from config import Settings
 from src import notifier
 from src.watchlist_store import WatchlistStore
-from src.telegram_bot import _is_authorized
+from src.telegram_bot import _is_authorized, check_channel_permissions
 
 
 @pytest.mark.parametrize(("field", "value"), [
@@ -98,6 +100,51 @@ def test_basic_group_chat_also_requires_user_allowlist():
     })()
     settings = Settings(_env_file=None, telegram_chat_id="-12345")
     assert _is_authorized(update, settings) is False
+
+
+@pytest.mark.parametrize(
+    ("can_post_messages", "expected"),
+    [(True, "✅"), (False, "❌"), (None, "❌")],
+)
+def test_channel_permission_requires_explicit_post_right(can_post_messages, expected):
+    class FakeBot:
+        async def get_me(self):
+            return SimpleNamespace(id=42)
+
+        async def get_chat(self, _target):
+            return SimpleNamespace(type="channel")
+
+        async def get_chat_member(self, _target, _user_id):
+            return SimpleNamespace(status="administrator", can_post_messages=can_post_messages)
+
+    settings = Settings(_env_file=None, telegram_channel_id="-100123")
+    result = asyncio.run(check_channel_permissions(FakeBot(), settings))
+
+    assert expected in result
+    if can_post_messages is None:
+        assert "تعذر إثبات" in result
+
+
+def test_group_destination_accepts_admin_role_without_channel_only_permission_flag():
+    class FakeBot:
+        async def get_me(self):
+            return SimpleNamespace(id=42)
+
+        async def get_chat(self, _target):
+            return SimpleNamespace(type="supergroup")
+
+        async def get_chat_member(self, _target, _user_id):
+            return SimpleNamespace(status="administrator", can_post_messages=None)
+
+    settings = Settings(_env_file=None, telegram_channel_id="-100123")
+    result = asyncio.run(check_channel_permissions(FakeBot(), settings))
+    assert "مشرف في المجموعة ويستطيع النشر" in result
+
+
+def test_channel_permission_check_does_not_fall_back_to_control_chat():
+    settings = Settings(_env_file=None, telegram_chat_id="111")
+    result = asyncio.run(check_channel_permissions(None, settings))
+    assert "لم يُضبط TELEGRAM_CHANNEL_ID" in result
 
 
 def test_private_control_panel_works_when_alerts_target_a_basic_group():

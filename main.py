@@ -129,8 +129,7 @@ def _load_news_pause_state() -> None:
 
 
 def monitor_news_state(settings: Settings | None = None) -> bool:
-    """يفحص حالة الأخبار كل دقيقة؛ يرسل تنبيه التوقف عند بدء الخبر،
-    ويرسل تنبيه العودة الفورية للعمل فور انتهاء الخبر مباشرة."""
+    """Check the news gate and notify once per persisted pause/resume transition."""
     global _is_paused_for_news, _scan_deferred_by_news
     settings = settings or get_settings()
 
@@ -144,38 +143,36 @@ def monitor_news_state(settings: Settings | None = None) -> bool:
             data_available=False,
         )
 
-    report_health(
-        "economic_calendar",
-        bool(news_status.data_available),
-        news_status.details,
-        settings,
-    )
-
     should_run_deferred_scan = False
-
+    send_pause_notice = False
+    send_resume_notice = False
     with _state_lock:
         if news_status.is_paused:
             if not _is_paused_for_news:
                 _is_paused_for_news = True
-                logger.warning("pausing bot due to high-impact news: %s", news_status.details)
-                send_news_pause_alert(news_status.details, settings)
+                logger.warning("pausing recommendations: %s", news_status.details)
                 _save_news_pause_state()
-            return True
-        else:
-            if _is_paused_for_news:
-                _is_paused_for_news = False
-                logger.info("high-impact news window ended — resuming bot operations immediately")
-                send_news_resume_alert(settings)
-                if _scan_deferred_by_news:
-                    _scan_deferred_by_news = False
-                    should_run_deferred_scan = True
-                _save_news_pause_state()
+                send_pause_notice = True
+        elif _is_paused_for_news:
+            _is_paused_for_news = False
+            logger.info("news gate cleared — resuming bot operations immediately")
+            if _scan_deferred_by_news:
+                _scan_deferred_by_news = False
+                should_run_deferred_scan = True
+            _save_news_pause_state()
+            send_resume_notice = True
 
+    # Persist the transition and release the lock before any network I/O. This
+    # prevents parallel monitor ticks from sending the same alert repeatedly.
+    if send_pause_notice:
+        send_news_pause_alert(news_status.details, settings)
+    if send_resume_notice:
+        send_news_resume_alert(settings)
     if should_run_deferred_scan:
         logger.info("running deferred scan cycle immediately after news clearance")
         run_scan_cycle(settings)
 
-    return False
+    return bool(news_status.is_paused)
 
 
 def run_scan_cycle(settings: Settings | None = None) -> None:
@@ -186,6 +183,7 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
     if monitor_news_state(settings):
         with _state_lock:
             _scan_deferred_by_news = True
+            _save_news_pause_state()
         logger.info("auto-scan cycle paused due to active high-impact economic news")
         return
 

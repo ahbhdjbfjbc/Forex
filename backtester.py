@@ -16,11 +16,9 @@ to "now"). A signal computed from bar `i`'s close fills at bar `i+1`'s open
 — a signal can't realistically fill at the same price it was decided on.
 
 Known simplifications (see also CLAUDE.md):
-  - Only TP1 is simulated as an exit target (not partial scaling out at TP1
-    then trailing to TP2) — this keeps the walk-forward loop's position
-    state trivial (flat or one open trade) while still testing the
-    strategy's real entry/SL/TP1 logic.
-  - If both the stop-loss and TP1 are touched within the same bar (a bar
+  - The single displayed/live lifecycle target is TP2; the backtest uses TP2
+    as its sole exit and does not simulate partial scaling out at TP1.
+  - If both the stop-loss and TP2 are touched within the same bar (a bar
     with a wide range), the stop-loss is assumed to have hit first. This is
     the conservative assumption — it can't be determined from OHLC bars
     alone without tick data, and assuming the win always resolves first
@@ -55,7 +53,7 @@ MIN_WARMUP_BARS = 210  # enough for EMA200 + indicator warm-up, matches data_pro
 
 class ExitReason(str, Enum):
     STOP_LOSS = "STOP_LOSS"
-    TAKE_PROFIT_1 = "TAKE_PROFIT_1"
+    TAKE_PROFIT_2 = "TAKE_PROFIT_2"
     END_OF_DATA = "END_OF_DATA"
 
 
@@ -69,7 +67,7 @@ class Trade:
     exit_time: datetime
     exit_price: float
     stop_loss_price: float
-    take_profit_1_price: float
+    target_price: float
     exit_reason: ExitReason
     r_multiple: float  # realized P&L in units of planned risk; 1R = the stop distance
 
@@ -127,7 +125,7 @@ def _close_trade(
         exit_time=exit_time,
         exit_price=exit_price,
         stop_loss_price=sl,
-        take_profit_1_price=open_trade["take_profit_1_price"],
+        target_price=open_trade["target_price"],
         exit_reason=exit_reason,
         r_multiple=round(r_multiple, 4),
     )
@@ -179,15 +177,15 @@ def run_backtest(
         if open_trade is not None:
             direction = open_trade["direction"]
             sl = open_trade["stop_loss_price"]
-            tp1 = open_trade["take_profit_1_price"]
+            target = open_trade["target_price"]
             hi, lo = float(current_bar["High"]), float(current_bar["Low"])
 
             hit_sl = (lo <= sl) if direction == TradeDirection.BUY else (hi >= sl)
-            hit_tp = (hi >= tp1) if direction == TradeDirection.BUY else (lo <= tp1)
+            hit_tp = (hi >= target) if direction == TradeDirection.BUY else (lo <= target)
 
             if hit_sl or hit_tp:
                 # Conservative same-bar-ambiguity resolution: SL wins if both touched.
-                exit_price, exit_reason = (sl, ExitReason.STOP_LOSS) if hit_sl else (tp1, ExitReason.TAKE_PROFIT_1)
+                exit_price, exit_reason = (sl, ExitReason.STOP_LOSS) if hit_sl else (target, ExitReason.TAKE_PROFIT_2)
                 trade = _close_trade(open_trade, current_bar.name, exit_price, exit_reason)
                 trades.append(trade)
                 equity *= 1 + trade.r_multiple * risk_fraction
@@ -215,7 +213,7 @@ def run_backtest(
                     "entry_price": float(next_bar["Open"]),
                     "entry_time": next_bar.name,
                     "stop_loss_price": signal.stop_loss_price,
-                    "take_profit_1_price": signal.take_profit_1_price,
+                    "target_price": signal.take_profit_2_price,
                 }
 
     if open_trade is not None:

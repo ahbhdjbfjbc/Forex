@@ -92,15 +92,96 @@ def test_active_high_impact_news_pauses(monkeypatch):
     assert "Rate announcement" in status.details
 
 
-def test_news_gate_monitor_fails_closed_on_unexpected_error(monkeypatch):
+def test_malformed_high_impact_event_date_fails_closed(monkeypatch):
+    event = {"impact": "High", "country": "USD", "title": "Rate announcement", "date": "not-a-date"}
+    monkeypatch.setattr(news_filter, "_fetch_calendar_events", lambda: [event])
+
+    status = news_filter.check_news_status(
+        SimpleNamespace(enable_news_filter=True, news_buffer_minutes=30)
+    )
+
+    assert status.is_paused is True
+    assert status.data_available is False
+    assert "غير مكتملة" in status.details
+
+
+def test_news_gate_monitor_fails_closed_on_unexpected_error(monkeypatch, tmp_path):
+    from src import storage
     import main
     settings = SimpleNamespace(enable_news_filter=True)
+    monkeypatch.setattr(storage, "get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(main, "report_health", lambda *_args: False)
     monkeypatch.setattr(main, "check_news_status", lambda _settings: (_ for _ in ()).throw(RuntimeError("feed down")))
     monkeypatch.setattr(main, "send_news_pause_alert", lambda *_args: None)
     monkeypatch.setattr(main, "send_news_resume_alert", lambda *_args: None)
     monkeypatch.setattr(main, "_is_paused_for_news", False)
     monkeypatch.setattr(main, "_scan_deferred_by_news", False)
     assert main.monitor_news_state(settings) is True
+
+
+def test_news_pause_notice_is_once_per_transition_even_after_state_reload(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from src import storage
+    import main
+
+    monkeypatch.setattr(storage, "get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(main, "report_health", lambda *_args: False)
+    settings = SimpleNamespace(enable_news_filter=True)
+    unavailable = SimpleNamespace(
+        is_paused=True,
+        data_available=False,
+        details="تعذر التحقق من تقويم الأخبار؛ تم إيقاف التوصيات مؤقتاً احترازياً.",
+    )
+    healthy = SimpleNamespace(is_paused=False, data_available=True, details="calendar available")
+    current = [unavailable]
+    monkeypatch.setattr(main, "check_news_status", lambda _settings: current[0])
+    pauses, resumes = [], []
+    monkeypatch.setattr(main, "send_news_pause_alert", lambda details, _settings: pauses.append(details) or {"telegram": True})
+    monkeypatch.setattr(main, "send_news_resume_alert", lambda *_args: resumes.append("resume") or {"telegram": True})
+    monkeypatch.setattr(main, "_is_paused_for_news", False)
+    monkeypatch.setattr(main, "_scan_deferred_by_news", False)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert all(pool.map(lambda _n: main.monitor_news_state(settings), range(8)))
+    assert len(pauses) == 1
+
+    # Simulate process restart while the persistent news pause is still active.
+    monkeypatch.setattr(main, "_is_paused_for_news", False)
+    monkeypatch.setattr(main, "_scan_deferred_by_news", False)
+    main._load_news_pause_state()
+    assert main.monitor_news_state(settings) is True
+    assert len(pauses) == 1
+
+    current[0] = healthy
+    assert main.monitor_news_state(settings) is False
+    assert main.monitor_news_state(settings) is False
+    assert len(resumes) == 1
+
+
+def test_news_pause_message_does_not_claim_a_real_event_or_post_to_channel(monkeypatch):
+    from config import Settings
+    from src import notifier
+
+    settings = Settings(
+        _env_file=None,
+        telegram_bot_token="1:x",
+        telegram_allowed_user_id="111",
+        telegram_chat_id="-100group",
+        telegram_channel_id="-100channel",
+    )
+    messages = []
+    monkeypatch.setattr(notifier, "send_admin_message", lambda message, _settings: messages.append(message) or True)
+    monkeypatch.setattr(notifier, "dispatch_message", lambda *_a, **_k: pytest.fail("pause notice must not broadcast"))
+
+    result = notifier.send_news_pause_alert(
+        "تعذر التحقق من تقويم الأخبار الاقتصادي؛ تم إيقاف التوصيات.", settings
+    )
+
+    assert result["telegram"] is True
+    assert len(messages) == 1
+    assert "تعذر التحقق من تقويم الأخبار" in messages[0]
+    assert "لا يعني أن خبراً محدداً قد رُصد" in messages[0]
+    assert "رصد أخبار اقتصادية قوية" not in messages[0]
 
 
 def _alert(bar_time, timeframe="15m", strategy=None):

@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     # Notifications
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
-    telegram_channel_id: str = ""            # معرف القناة لنشر التوصيات والتنبيهات عليها
+    telegram_channel_id: str = ""            # وجهة إلزامية للتوصيات المصورة ونتائجها
     # Optional Telegram user ID allowlist. Required when commands are enabled
     # in a group/supergroup, where a chat ID alone would authorize everyone.
     telegram_allowed_user_id: str = ""
@@ -193,8 +193,8 @@ class Settings(BaseSettings):
 
     @property
     def target_channel_id(self) -> str:
-        """يرسل إلى القناة إذا تم تحديدها، وإلا يرسل إلى معرف المحادثة الافتراضي."""
-        return self.telegram_channel_id.strip() or self.telegram_chat_id.strip()
+        """Return only the explicit signal channel; never fall back to a private chat."""
+        return self.telegram_channel_id.strip()
 
     @property
     def watchlist_symbols(self) -> list[str]:

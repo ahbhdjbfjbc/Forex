@@ -213,7 +213,7 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
     monkeypatch.setattr(
         notifier,
         "dispatch_message",
-        lambda message, _settings=None: messages.append(message) or {"telegram": True},
+        lambda message, _settings=None, **_kwargs: messages.append(message) or {"telegram": True},
     )
     monkeypatch.setattr(
         notifier,

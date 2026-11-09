@@ -10,6 +10,7 @@ import shutil
 from dataclasses import fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -18,7 +19,7 @@ from backtester import BacktestResult, ExitReason, Trade, _compute_result, _reso
 from config import Settings
 from src import ast_patcher
 from src import oanda_client as oc
-from src.models import TradeDirection
+from src.models import MarketRegime, TradeDirection
 from src.strategy_params import get_strategy_params, load_all_params, save_strategy_params
 from strategies.breakout import BreakoutParams
 from strategies.mean_reversion import MeanReversionParams
@@ -142,8 +143,8 @@ class TestBacktesterMetrics:
             symbol="EURUSD", timeframe="1h", direction=TradeDirection.BUY,
             entry_time=entry_time, entry_price=1.1000,
             exit_time=exit_time, exit_price=1.1000 + r_multiple * 0.0010,
-            stop_loss_price=1.0990, take_profit_1_price=1.1020,
-            exit_reason=ExitReason.TAKE_PROFIT_1 if r_multiple > 0 else ExitReason.STOP_LOSS,
+            stop_loss_price=1.0990, target_price=1.1020,
+            exit_reason=ExitReason.TAKE_PROFIT_2 if r_multiple > 0 else ExitReason.STOP_LOSS,
             r_multiple=r_multiple,
         )
 
@@ -251,6 +252,50 @@ class TestRunBacktestIntegration:
     def test_no_data_returns_none(self, monkeypatch, settings):
         monkeypatch.setattr("backtester.fetch_ohlcv", lambda request: None)
         assert run_backtest("EURUSD", "1h", settings) is None
+
+    def test_backtest_uses_the_live_single_target_tp2(self, monkeypatch, settings):
+        import backtester
+
+        df = md.make_strong_trend_bullish(bars=400, seed=11)
+        entry = float(df.iloc[211]["Open"])
+        df.iloc[211, df.columns.get_loc("Open")] = entry
+        df.iloc[211, df.columns.get_loc("High")] = entry + 0.006
+        df.iloc[211, df.columns.get_loc("Low")] = entry - 0.001
+        df.iloc[211, df.columns.get_loc("Close")] = entry + 0.002
+        df.iloc[212, df.columns.get_loc("Open")] = entry + 0.002
+        df.iloc[212, df.columns.get_loc("High")] = entry + 0.011
+        df.iloc[212, df.columns.get_loc("Low")] = entry + 0.001
+        df.iloc[212, df.columns.get_loc("Close")] = entry + 0.009
+        signal = SimpleNamespace(
+            direction=TradeDirection.BUY,
+            stop_loss_price=entry - 0.005,
+            take_profit_1_price=entry + 0.005,
+            take_profit_2_price=entry + 0.010,
+        )
+        calls = 0
+
+        def emit_signal(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return signal if calls == 1 else None
+
+        monkeypatch.setattr(backtester, "fetch_ohlcv", lambda _request: df)
+        monkeypatch.setattr(backtester, "_build_metrics", lambda _frame: object())
+        monkeypatch.setattr(
+            backtester,
+            "classify_regime",
+            lambda *_args: (MarketRegime.STRONG_TREND_BULLISH, 0.9),
+        )
+        monkeypatch.setattr(backtester, "generate_signal", emit_signal)
+
+        result = run_backtest("EURUSD", "1h", settings, lookback_months=None)
+
+        assert result is not None and result.total_trades == 1
+        trade = result.trades[0]
+        assert trade.exit_reason == ExitReason.TAKE_PROFIT_2
+        assert trade.exit_time == df.index[212]
+        assert trade.target_price == pytest.approx(entry + 0.010)
+        assert trade.exit_price == pytest.approx(entry + 0.010)
 
     def test_param_overrides_change_backtest_outcome(self, monkeypatch, settings):
         df = md.make_strong_trend_bullish(bars=400, seed=7)
