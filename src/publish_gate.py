@@ -5,13 +5,15 @@ hourly auto-scan, the admin `/scan_all` command, the manual publish button
 and the TradingView webhook. Calling this gate there guarantees that every
 path applies the same rules:
 
-1. high-impact news for the instrument's own currencies (fails closed when
+1. a verified real-time data provider (fails closed until a live adapter is
+   implemented; historical or delayed bars are not enough);
+2. high-impact news for the instrument's own currencies (fails closed when
    the calendar is unavailable — the same policy as the original filter);
-2. FX/metals market hours (no publishing during the weekend close);
-3. multi-timeframe alignment — the next higher timeframe must not be in a
+3. FX/metals market hours (mandatory; cannot be disabled by environment);
+4. multi-timeframe alignment — the next higher timeframe must not be in a
    strong opposite trend or have opposite structure with price on the wrong
    side of its EMA50 (fails closed when that data cannot be fetched);
-4. gold only: a strong same-day US Dollar Index move against the trade.
+5. gold only: a strong same-day US Dollar Index move against the trade.
    DXY is optional context; when it cannot be fetched the gate allows the
    trade and says so in the log instead of inventing a value.
 
@@ -31,6 +33,11 @@ from src.models import MarketRegime, StrategyType, TradeDirection, TradeSignal
 from src.symbol_resolver import instrument_type, sanitize_symbol, to_yfinance_ticker
 
 logger = logging.getLogger(__name__)
+
+# No provider adapter in this repository currently proves that its quotes are
+# real-time. Add a name only with a tested adapter that preserves observation
+# timestamps; a fresh historical bar is not proof of a live quote.
+_VERIFIED_REALTIME_PROVIDER_NAMES: frozenset[str] = frozenset()
 
 HIGHER_TIMEFRAME = {
     "1m": "15m", "5m": "1h", "15m": "1h", "30m": "4h",
@@ -79,13 +86,33 @@ def _check_news(signal: TradeSignal, settings: Settings) -> GateDecision:
 
 
 def _check_market_hours(signal: TradeSignal, settings: Settings, now: datetime | None) -> GateDecision:
-    if not getattr(settings, "enable_market_hours_filter", True):
-        return GateDecision(True)
     if instrument_type(signal.symbol) == "CRYPTO":
         return GateDecision(True)
     if not fx_market_open(now):
         return GateDecision(False, "سوق الفوركس/الذهب مغلق (عطلة نهاية الأسبوع)")
     return GateDecision(True)
+
+
+def is_verified_realtime_provider(provider: str) -> bool:
+    """Return whether a provider adapter is implemented and verified as real-time."""
+    return str(provider or "").strip().lower() in _VERIFIED_REALTIME_PROVIDER_NAMES
+
+
+def _check_live_data_source(settings: Settings) -> GateDecision:
+    """Require an implemented provider whose real-time capability is verified."""
+    provider = str(getattr(settings, "data_provider", "") or "").strip().lower()
+    if is_verified_realtime_provider(provider):
+        return GateDecision(True)
+    if provider == "yfinance":
+        return GateDecision(
+            False,
+            "مصدر Yahoo Finance في هذا المشروع شموع OHLCV تاريخية/قد تكون متأخرة ولا يثبت سعراً لحظياً؛ "
+            "أُوقف النشر حتى ربط مزود لحظي موثوق.",
+        )
+    return GateDecision(
+        False,
+        f"مزود الأسعار {provider or 'غير محدد'} غير مسجل كمصدر لحظي موثق؛ أُوقف النشر احترازياً.",
+    )
 
 
 def _check_mtf(signal: TradeSignal, settings: Settings) -> GateDecision:
@@ -171,6 +198,7 @@ def check_publish_allowed(
     settings = settings or get_settings()
     checks = (
         lambda: _check_market_hours(signal, settings, now),
+        lambda: _check_live_data_source(settings),
         lambda: _check_news(signal, settings),
         lambda: _check_mtf(signal, settings),
         lambda: _check_dxy(signal, settings),

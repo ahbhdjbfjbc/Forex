@@ -48,6 +48,7 @@ from config import Settings, get_settings
 from src.admin_audit import record_admin_action
 from src import indicators as ind
 from src import oanda_client
+from src import publish_gate
 from src.models import MarketRegime, RegimeResult
 from src.notifier import (
     DIRECTION_EMOJI,
@@ -445,6 +446,13 @@ def run_on_demand_scan(raw_text: str, settings: Settings | None = None) -> str:
 
     signal = generate_signal(regime_result, df, settings)
     if signal is not None:
+        decision = publish_gate.check_publish_allowed(signal, settings)
+        if not decision.allowed:
+            return (
+                f"📊 تقرير الفحص: {display_pair(symbol)}\n"
+                "⛔ لم يصدر النظام توصية قابلة للنشر، ولم تُرسل إلى أي محادثة.\n"
+                f"السبب: {decision.reason}"
+            )
         return _format_found_report(symbol, effective_primary_tf, scanned_tfs, regime_result, signal, df)
     return _format_no_trade_report(symbol, effective_primary_tf, scanned_tfs, regime_result)
 
@@ -453,14 +461,16 @@ def _hide_trade_details_in_command_reply(report: str) -> str:
     """Keep command chats responsive while reserving full signals for the signal channel."""
     if "🎯 التوصية: دخول صفقة" in report:
         return (
-            "✅ اكتمل التحليل ووجد النظام مرشحاً مستوفياً للشروط الأولية.\n"
+            "✅ اكتمل التحليل ووجد النظام مرشحاً أولياً؛ هذا ليس إثباتاً لربحية أو تنفيذ صفقة.\n"
             "🔒 لا تُعرض تفاصيل الدخول والوقف والهدف في محادثة الأوامر؛ "
-            "استخدم زر الإرسال الصريح لنشر التوصية المصورة في قناة الإشارات فقط."
+            "ولا يُنشر شيء ما لم يكن السوق مفتوحاً ومصدر الأسعار اللحظي موثقاً. "
+            "التوصيات المقبولة تُرسل إلى قناة الإشارات المحددة فقط."
         )
     if "🎯 التوصيات والفرص المكتملة:" in report:
         return (
             "✅ اكتمل الفحص الشامل. تفاصيل التوصيات لا تُكرر في محادثة الأوامر؛ "
-            "التوصية التي تجتاز البوابات تُرسل بصورة إلى قناة الإشارات المحددة فقط.\n"
+            "ويُحجب النشر إذا كان السوق مغلقاً أو مصدر الأسعار اللحظي غير موثق. "
+            "التوصية المقبولة تُرسل بصورة إلى قناة الإشارات المحددة فقط.\n"
             "📈 أرسل /results لمتابعة النتائج المسجلة."
         )
     return report

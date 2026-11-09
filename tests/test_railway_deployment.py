@@ -245,6 +245,7 @@ def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
 
     monkeypatch.setattr(app.watchlist_store, "get_all", lambda: ["EURUSD"])
     monkeypatch.setattr(app, "monitor_news_state", lambda _settings: False)
+    monkeypatch.setattr(app, "fx_market_open", lambda *_a: True)
     monkeypatch.setattr(app, "scan_symbols_with_data", lambda _symbols, _settings: [(regime, frame)])
     monkeypatch.setattr(app, "generate_signal", lambda *_args, **_kwargs: signal)
     monkeypatch.setattr(
@@ -265,6 +266,41 @@ def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
     assert len(paper_trades) == 2
 
 
+def test_auto_scan_skips_fx_signal_generation_when_market_is_closed(monkeypatch):
+    import main as app
+
+    settings = Settings(_env_file=None)
+    scanned = []
+    monkeypatch.setattr(app.watchlist_store, "get_all", lambda: ["EURUSD=X"])
+    monkeypatch.setattr(app, "monitor_news_state", lambda _settings: False)
+    monkeypatch.setattr(app, "flush_pending_signal_outcomes", lambda *_a: None)
+    monkeypatch.setattr(app, "fx_market_open", lambda *_a: False)
+    monkeypatch.setattr(app, "scan_symbols_with_data", lambda *_a: scanned.append(True))
+
+    app.run_scan_cycle(settings)
+
+    assert scanned == []
+
+
+def test_unverified_yahoo_feed_is_reported_as_unhealthy(monkeypatch):
+    import main as app
+
+    settings = Settings(_env_file=None, data_provider="yfinance")
+    health = []
+    monkeypatch.setattr(app.watchlist_store, "get_all", lambda: ["EURUSD=X"])
+    monkeypatch.setattr(app, "monitor_news_state", lambda _settings: False)
+    monkeypatch.setattr(app, "flush_pending_signal_outcomes", lambda *_a: None)
+    monkeypatch.setattr(app, "fx_market_open", lambda *_a: True)
+    monkeypatch.setattr(app, "scan_symbols_with_data", lambda *_a: [])
+    monkeypatch.setattr(app, "report_health", lambda *args: health.append(args))
+
+    app.run_scan_cycle(settings)
+
+    market_status = next(item for item in health if item[0] == "market_data")
+    assert market_status[1] is False
+    assert "غير موثق لحظياً" in market_status[2]
+
+
 def test_no_signal_alerts_are_opt_in_to_avoid_repetitive_notifications(monkeypatch) -> None:
     import main as app
 
@@ -274,6 +310,7 @@ def test_no_signal_alerts_are_opt_in_to_avoid_repetitive_notifications(monkeypat
     sent = []
     monkeypatch.setattr(app.watchlist_store, "get_all", lambda: ["EURUSD"])
     monkeypatch.setattr(app, "monitor_news_state", lambda _settings: False)
+    monkeypatch.setattr(app, "fx_market_open", lambda *_a: True)
     monkeypatch.setattr(app, "scan_symbols_with_data", lambda *_args: regime_data)
     monkeypatch.setattr(app, "generate_signal", lambda *_args: None)
     monkeypatch.setattr(app, "send_no_signal_alert", lambda *_args: sent.append(True))

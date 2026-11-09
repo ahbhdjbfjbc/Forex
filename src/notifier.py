@@ -378,7 +378,8 @@ def format_signal_outcome(outcome: SignalOutcome) -> str:
         f"📐 الحركة السعرية: {points_label}\n"
         f"⏱️ مدة التوصية: {duration}\n"
         f"🕒 وقت التحقق: {outcome.closed_at} UTC | المصدر: {outcome.source}\n"
-        "ℹ️ مصدر OHLCV لا يوفر Bid/Ask؛ السبريد والانزلاق غير محتسبين، والنتيجة تقديرية.\n"
+        "⚠️ هذه نتيجة سعرية تقديرية من شموع OHLCV؛ لا تعني تنفيذ صفقة فعلية أو ربحاً محققاً لدى وسيط.\n"
+        "ℹ️ مصدر OHLCV لا يوفر Bid/Ask؛ السبريد والانزلاق غير محتسبين.\n"
         f"🆔 رقم التوصية: {outcome.signal_id}"
     )
 

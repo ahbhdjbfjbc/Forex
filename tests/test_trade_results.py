@@ -97,6 +97,7 @@ def test_full_signal_chart_levels_and_final_outcome_use_the_configured_group(mon
     assert name == "sendMessage"
     assert kwargs["json"]["chat_id"] == "-100signals"
     assert kwargs["json"]["reply_parameters"]["message_id"] == 777
+    assert "لا تعني تنفيذ صفقة فعلية" in kwargs["json"]["text"]
 
 
 def test_signal_photo_never_falls_back_to_private_chat(monkeypatch, tmp_path):

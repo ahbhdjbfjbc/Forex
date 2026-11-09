@@ -30,7 +30,8 @@ class Settings(BaseSettings):
     atr_expansion_multiplier: float = 1.5
     bb_squeeze_percentile: float = 20.0
 
-    # Data provider
+    # The current yfinance adapter supplies historical/delayed OHLCV; it is
+    # not verified real-time data and cannot pass the publication gate.
     data_provider: str = "yfinance"
     scan_interval_seconds: int = 300
 
@@ -50,7 +51,9 @@ class Settings(BaseSettings):
     # path: auto-scan, /scan_all, manual publish button and TradingView webhook.
     enable_mtf_filter: bool = True           # رفض الصفقة إذا عاكسها الإطار الأعلى
     enable_dxy_filter: bool = True           # فلتر مؤشر الدولار للذهب (يُتجاهل إن تعذر جلبه)
-    enable_market_hours_filter: bool = True  # عدم النشر أثناء إغلاق سوق الفوركس في العطلة
+    # Retained for backwards-compatible configuration; final publish checks
+    # enforce FX/metals weekend closure regardless of this flag.
+    enable_market_hours_filter: bool = True
     outcome_check_interval_seconds: int = 300  # متابعة الصفقات المفتوحة كل 5 دقائق
 
     # TradingView webhook hardening (optional)

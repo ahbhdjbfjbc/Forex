@@ -56,9 +56,16 @@ python strategy_evolver.py --apply <proposal_id>   # only works if that proposal
 See [Railway deployment notes](RAILWAY_DEPLOYMENT_AR.md) for hosted deployment,
 environment variables, persistent storage, and health-check settings.
 
+> **Live-data limitation:** The implemented `yfinance` adapter returns OHLCV
+> bars that may be historical or delayed; freshness checks do not prove a
+> real-time quote. No verified real-time provider adapter is currently
+> implemented, so the publication gate blocks new recommendations. Outcome
+> tracking is an OHLCV-based price estimate, not a broker execution or realized
+> profit statement. Passing local tests does not prove a production deployment.
+
 ## What each piece does
 
-- **`src/scanner_1_regime.py`** — pulls OHLCV (via `yfinance`, resampled to
+- **`src/scanner_1_regime.py`** — pulls historical/delayed OHLCV (via `yfinance`, resampled to
   4H/1H/15M as needed) for every symbol in `WATCHLIST`, computes ADX, EMA
   20/50/200 alignment, swing structure, ATR expansion, Bollinger bandwidth,
   RVOL, and active FX session, then classifies each (symbol, timeframe) pair
@@ -86,8 +93,8 @@ environment variables, persistent storage, and health-check settings.
 - **`src/telegram_bot.py`** — on-demand scanning: message the bot any pair
   or ticker (`EURUSD`, `XAUUSD`, `GBPJPY`, `BTCUSD`, or aliases like `gold`/
   `cable`/`bitcoin`), or use `/scan <symbol>`, and it runs Scanner 1 ->
-  Scanner 2 fresh and replies with a "SCAN REPORT" — either a full trade
-  setup or a "DO NOT TRADE" with the reason. Every symbol you scan is
+  Scanner 2 to produce an analysis report. Any candidate is withheld when the
+  market is closed or the price feed is not verified real-time. Every symbol you scan is
   auto-added to the hourly auto-scan watchlist. Also handles `/watchlist`
   (list what's being auto-scanned), `/add <symbol>`, `/remove <symbol>`.
   Every command, message, and callback fails closed unless
@@ -105,8 +112,8 @@ environment variables, persistent storage, and health-check settings.
 
 - **`main.py`** — every `AUTO_SCAN_INTERVAL_SECONDS` (default 1h), scans
   `watchlist_store`'s symbols through Scanner 1 -> Scanner 2 and pushes a
-  Telegram/Discord alert only for setups that are both actively triggered
-  *and* at or above `MIN_SIGNAL_CONFIDENCE` (default 0.72) — everything else,
+  alert only for setups that are actively triggered, above
+  `MIN_SIGNAL_CONFIDENCE` (default 0.72), and accepted by every publish gate — everything else,
   including any `LOW_LIQUIDITY_CHOP` regime, stays silent. Also serves the
   webhook bridge + the Telegram bot concurrently in the same asyncio event
   loop. If `ENABLE_PAPER_TRADING=true`, each dispatched signal is also
@@ -118,11 +125,11 @@ environment variables, persistent storage, and health-check settings.
   live in `data/strategy_params.json` (`src/strategy_params.py`), not
   hardcoded — `scanner_2_strategy.py` reads them fresh on every scan.
 
-- **`backtester.py`** — a walk-forward engine that calls the *exact same*
-  Scanner 1/2 code that runs live, bar by bar, with no lookahead (a signal
-  computed on bar `i`'s close fills at bar `i+1`'s open). Computes Win Rate,
-  Profit Factor, Sharpe Ratio, Max Drawdown, and realized R-multiple from
-  the resulting trades.
+- **`backtester.py`** — a walk-forward simulation that calls the same
+  Scanner 1/2 logic bar by bar, without lookahead (a signal computed on bar
+  `i`'s close is simulated at bar `i+1`'s open). It computes simulated Win Rate,
+  Profit Factor, Sharpe Ratio, Max Drawdown, and R-multiple; it does not report
+  actual broker fills or realized account P&L.
 
 - **`strategy_evolver.py`** — a script (not an autonomous background loop)
   that evaluates parameter variants on an earlier 70% chronological training

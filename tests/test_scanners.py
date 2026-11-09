@@ -550,6 +550,28 @@ class TestOnDemandScan:
         assert "الاستراتيجية المطابقة:" in report
         assert "سعر الدخول:" in report and "وقف الخسارة:" in report
 
+    def test_blocked_signal_is_not_returned_as_a_recommendation(self, monkeypatch, settings):
+        from src.publish_gate import GateDecision
+
+        df = md.make_trend_pullback_bullish()
+        metrics = _build_metrics(df)
+        regime, confidence = classify_regime(metrics, settings)
+        result = RegimeResult("EURUSD", "1h", regime, metrics, confidence)
+        monkeypatch.setattr(
+            "src.telegram_bot.scan_regime_with_data", lambda *a, **k: (result, df)
+        )
+        monkeypatch.setattr(
+            "src.publish_gate.check_publish_allowed",
+            lambda *_a, **_k: GateDecision(False, "market closed"),
+        )
+
+        report = run_on_demand_scan("EURUSD", settings)
+
+        assert "لم يصدر النظام توصية قابلة للنشر" in report
+        assert "market closed" in report
+        assert "سعر الدخول:" not in report
+        assert "وقف الخسارة:" not in report
+
     def test_no_trade_report(self, monkeypatch, settings):
         df = md.make_low_liquidity_chop()
         metrics = _build_metrics(df)

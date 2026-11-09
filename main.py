@@ -14,11 +14,11 @@ Both the webhook server and the Telegram bot are asyncio-based, so they run
 concurrently in a single event loop; APScheduler's BackgroundScheduler runs
 the periodic scan loop on its own thread independently of that loop.
 
-Only high-confidence, actively-triggered setups get pushed — anything with
-no active entry trigger (Scanner 2 already returns None for those) or below
-`MIN_SIGNAL_CONFIDENCE` is suppressed, so a periodic tick over a growing
-watchlist doesn't turn into spam. If `ENABLE_PAPER_TRADING=true`, each
-dispatched signal is also mirrored to an OANDA practice account
+Only high-confidence, actively-triggered setups that pass every publication
+gate can be pushed. The current Yahoo OHLCV adapter is not verified real-time,
+so the final gate blocks new recommendation publication until a live provider
+is implemented. If `ENABLE_PAPER_TRADING=true`, each dispatched signal is
+also mirrored to an OANDA practice account
 (`src.paper_executor`) — opt-in, disabled by default.
 
 This module does no indicator/regime/strategy math itself — it only calls
@@ -45,7 +45,7 @@ from src.notifier import (
     send_signal_outcome,
 )
 from src.data_provider import OHLCVRequest, fetch_ohlcv
-from src.publish_gate import fx_market_open
+from src.publish_gate import fx_market_open, is_verified_realtime_provider
 from src.symbol_resolver import instrument_type, to_yfinance_ticker
 from src.paper_executor import execute_paper_trade
 from src.scanner_1_regime import scan_symbols_with_data
@@ -197,6 +197,12 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
         len(symbols), len(settings.timeframe_list),
     )
 
+    fx_open = fx_market_open()
+    symbols = [symbol for symbol in symbols if fx_open or instrument_type(symbol) == "CRYPTO"]
+    if not symbols:
+        logger.info("FX/metals market is closed; skipping signal generation for this auto-scan cycle")
+        return
+
     try:
         regime_data = scan_symbols_with_data(symbols, settings)
     except Exception as exc:
@@ -208,7 +214,6 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
         )
         return
 
-    fx_open = fx_market_open()
     expected_pairs = {
         (normalize_symbol(symbol), timeframe.lower())
         for symbol in symbols
@@ -220,8 +225,12 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
         (normalize_symbol(getattr(result, "symbol", "")), str(getattr(result, "timeframe", "")).lower())
         for result, _frame in regime_data
     }
-    market_healthy = (bool(regime_data) or not expected_pairs) and expected_pairs.issubset(received_pairs)
-    coverage = f"بيانات حديثة متاحة لـ {len(received_pairs & expected_pairs)}/{len(expected_pairs)} زوج/إطار."
+    freshness_ok = (bool(regime_data) or not expected_pairs) and expected_pairs.issubset(received_pairs)
+    provider_verified = is_verified_realtime_provider(settings.data_provider)
+    market_healthy = freshness_ok and provider_verified
+    coverage = f"شموع OHLCV ضمن حد freshness المحلي لـ {len(received_pairs & expected_pairs)}/{len(expected_pairs)} زوج/إطار."
+    if not provider_verified:
+        coverage += f" المصدر {settings.data_provider} غير موثق لحظياً؛ لا تُنشر توصيات جديدة."
     report_health("market_data", market_healthy, coverage, settings)
     signals_sent = 0
     suppressed_low_confidence = 0
