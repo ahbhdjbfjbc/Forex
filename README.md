@@ -56,16 +56,25 @@ python strategy_evolver.py --apply <proposal_id>   # only works if that proposal
 See [Railway deployment notes](RAILWAY_DEPLOYMENT_AR.md) for hosted deployment,
 environment variables, persistent storage, and health-check settings.
 
-> **Live-data limitation:** The implemented `yfinance` adapter returns OHLCV
-> bars that may be historical or delayed; freshness checks do not prove a
-> real-time quote. No verified real-time provider adapter is currently
-> implemented, so the publication gate blocks new recommendations. Outcome
-> tracking is an OHLCV-based price estimate, not a broker execution or realized
-> profit statement. Passing local tests does not prove a production deployment.
+> **Live-data requirement:** `DATA_PROVIDER=oanda` selects the implemented
+> OANDA v20 adapter. It uses completed midpoint candles for analysis and a
+> timestamped account Bid/Ask quote for current entry pricing. The gate blocks
+> publication if OANDA credentials are absent, the quote is stale/non-tradeable,
+> or OANDA is unavailable; it never falls back to Yahoo. Set `OANDA_API_TOKEN`,
+> `OANDA_ACCOUNT_ID`, and `OANDA_ENVIRONMENT` in the deployment secret store.
+> Local mocked tests do not prove a live account connection, production
+> deployment, profitability, or broker fills. Outcome tracking is still an
+> OHLCV-based estimate, not realized account P&L.
+
+After configuring the OANDA secrets on the host, verify a live account quote
+with `GET /health/market?symbol=EURUSD` and the `X-Webhook-Secret` header. The
+endpoint returns the timestamped Bid/Ask only for a fresh, tradeable quote; it
+is protected by the webhook shared secret and never submits an order. Plain
+`GET /health` checks HTTP readiness only.
 
 ## What each piece does
 
-- **`src/scanner_1_regime.py`** — pulls historical/delayed OHLCV (via `yfinance`, resampled to
+- **`src/scanner_1_regime.py`** — pulls completed midpoint OHLCV from the configured provider (OANDA by default, resampled to
   4H/1H/15M as needed) for every symbol in `WATCHLIST`, computes ADX, EMA
   20/50/200 alignment, swing structure, ATR expansion, Bollinger bandwidth,
   RVOL, and active FX session, then classifies each (symbol, timeframe) pair
@@ -81,8 +90,9 @@ environment variables, persistent storage, and health-check settings.
 - **`src/tradingview_bridge.py`** — FastAPI webhook at
   `POST /webhook/tradingview` for externally-triggered Pine Script alerts
   (see `pine_script/tv_indicator.pine`). Validates the JSON schema and a
-  shared secret, converts the alert into the same `TradeSignal` shape
-  Scanner 2 produces, and forwards it to the notifier.
+  shared secret, requires Pine's explicit stop-loss and two targets, confirms
+  direction/price with a fresh internal OANDA scan, rebases those levels to a
+  current OANDA Bid/Ask quote, and forwards the validated signal to the notifier.
 
 - **`src/notifier.py`** — formats and sends the trade alert to Telegram,
   including a chart and caption in one Telegram `sendPhoto` request. The PNG
@@ -102,8 +112,8 @@ environment variables, persistent storage, and health-check settings.
   This applies in private chats and groups; group commands additionally require
   `TELEGRAM_CHAT_ID` to match that group. A chat ID or username alone never
   authorizes an admin action. `src/symbol_resolver.py` handles the free-text -> ticker mapping
-  (including proxying gold/silver through `GC=F`/`SI=F` futures, since
-  Yahoo has no retail XAUUSD ticker).
+  (including mapping gold/silver to OANDA `XAU_USD`/`XAG_USD`; availability
+  depends on the instruments enabled for the account).
 
 - **`src/watchlist_store.py`** — the dynamic watchlist the hourly scheduler
   scans: seeded with `EURUSD, GBPUSD, XAUUSD, USDJPY`, grown by `/add` and

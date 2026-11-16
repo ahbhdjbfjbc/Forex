@@ -10,8 +10,10 @@ lot sizing needs to be exact.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 from src.models import RiskParameters, TradeDirection
+from src.symbol_resolver import instrument_type
 
 STANDARD_LOT_UNITS = 100_000
 
@@ -108,3 +110,74 @@ def calculate_unit_size(
         return 0.0
     risk_amount = account_size_usd * (risk_percent / 100)
     return round(risk_amount / distance, 4)
+
+
+def reprice_signal_to_quote(signal, quote, settings, max_entry_drift_r: float = 0.25):
+    """Rebase planned levels to a fresh side-specific quote without widening risk.
+
+    Preserves the strategy's price distances, rejects a moved entry beyond a
+    quarter of the planned initial risk, and rebuilds position sizing from the
+    new entry/stop. It does not execute or guarantee a broker fill.
+    """
+    old_entry = float(signal.entry_price)
+    old_stop = float(signal.stop_loss_price)
+    old_risk_distance = abs(old_entry - old_stop)
+    if not math.isfinite(old_entry) or not math.isfinite(old_stop) or old_risk_distance <= 0:
+        raise ValueError("signal has invalid entry or stop distance")
+
+    direction = signal.direction
+    new_entry = float(quote.ask if direction == TradeDirection.BUY else quote.bid)
+    delta = new_entry - old_entry
+    if abs(delta) > old_risk_distance * max_entry_drift_r:
+        raise ValueError("live quote moved more than the allowed fraction of initial risk")
+
+    new_stop = old_stop + delta
+    new_tp1 = float(signal.take_profit_1_price) + delta
+    new_tp2 = float(signal.take_profit_2_price) + delta
+    if direction == TradeDirection.BUY:
+        valid = new_stop < new_entry < new_tp1 < new_tp2
+    else:
+        valid = new_tp2 < new_tp1 < new_entry < new_stop
+    if not valid:
+        raise ValueError("rebased stop/target levels are not on the correct side of entry")
+    if abs(new_entry - new_stop) <= float(quote.spread) * 2:
+        raise ValueError("planned stop distance is too small relative to live spread")
+
+    symbol = signal.symbol
+    if instrument_type(symbol) == "FX":
+        risk_params = build_risk_parameters(
+            symbol, settings.account_size_usd, settings.risk_percent_per_trade,
+            new_entry, new_stop,
+        )
+        sl_distance = risk_params.stop_loss_pips
+        tp1_distance = round(price_to_pips(symbol, new_tp1 - new_entry), 1)
+        tp2_distance = round(price_to_pips(symbol, new_tp2 - new_entry), 1)
+    else:
+        unit_size = calculate_unit_size(
+            settings.account_size_usd, settings.risk_percent_per_trade, new_entry, new_stop
+        )
+        risk_params = RiskParameters(
+            account_size_usd=settings.account_size_usd,
+            risk_percent=settings.risk_percent_per_trade,
+            stop_loss_pips=round(abs(new_entry - new_stop), 4),
+            pip_value_per_lot=0.0,
+            lot_size=unit_size,
+            risk_amount_usd=round(settings.account_size_usd * settings.risk_percent_per_trade / 100, 2),
+        )
+        sl_distance = risk_params.stop_loss_pips
+        tp1_distance = round(abs(new_tp1 - new_entry), 4)
+        tp2_distance = round(abs(new_tp2 - new_entry), 4)
+
+    return replace(
+        signal,
+        entry_price=new_entry,
+        stop_loss_price=round(new_stop, 8),
+        stop_loss_pips=sl_distance,
+        take_profit_1_price=round(new_tp1, 8),
+        take_profit_1_pips=tp1_distance,
+        take_profit_1_rr=abs(new_tp1 - new_entry) / abs(new_entry - new_stop),
+        take_profit_2_price=round(new_tp2, 8),
+        take_profit_2_pips=tp2_distance,
+        take_profit_2_rr=abs(new_tp2 - new_entry) / abs(new_entry - new_stop),
+        risk=risk_params,
+    )

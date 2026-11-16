@@ -5,8 +5,8 @@ hourly auto-scan, the admin `/scan_all` command, the manual publish button
 and the TradingView webhook. Calling this gate there guarantees that every
 path applies the same rules:
 
-1. a verified real-time data provider (fails closed until a live adapter is
-   implemented; historical or delayed bars are not enough);
+1. the implemented OANDA v20 adapter and a current, tradeable, timestamped
+   Bid/Ask quote (historical or delayed bars alone are not enough);
 2. high-impact news for the instrument's own currencies (fails closed when
    the calendar is unavailable — the same policy as the original filter);
 3. FX/metals market hours (mandatory; cannot be disabled by environment);
@@ -34,10 +34,9 @@ from src.symbol_resolver import instrument_type, sanitize_symbol, to_yfinance_ti
 
 logger = logging.getLogger(__name__)
 
-# No provider adapter in this repository currently proves that its quotes are
-# real-time. Add a name only with a tested adapter that preserves observation
-# timestamps; a fresh historical bar is not proof of a live quote.
-_VERIFIED_REALTIME_PROVIDER_NAMES: frozenset[str] = frozenset()
+# OANDA is registered only because its adapter supplies a timestamped quote;
+# every publication still verifies a fresh quote at runtime.
+_VERIFIED_REALTIME_PROVIDER_NAMES: frozenset[str] = frozenset({"oanda"})
 
 HIGHER_TIMEFRAME = {
     "1m": "15m", "5m": "1h", "15m": "1h", "30m": "4h",
@@ -98,10 +97,27 @@ def is_verified_realtime_provider(provider: str) -> bool:
     return str(provider or "").strip().lower() in _VERIFIED_REALTIME_PROVIDER_NAMES
 
 
-def _check_live_data_source(settings: Settings) -> GateDecision:
+def _check_live_data_source(settings: Settings, symbol: str | None = None, live_quote=None) -> GateDecision:
     """Require an implemented provider whose real-time capability is verified."""
     provider = str(getattr(settings, "data_provider", "") or "").strip().lower()
     if is_verified_realtime_provider(provider):
+        if provider == "oanda":
+            if not symbol:
+                return GateDecision(False, "تعذر تحديد الرمز للتحقق من سعر OANDA الحي")
+            try:
+                from src.data_provider import (
+                    DataFetchError,
+                    ensure_live_quote_fresh,
+                    get_oanda_live_quote,
+                )
+
+                quote = live_quote or get_oanda_live_quote(symbol, settings)
+                ensure_live_quote_fresh(
+                    quote,
+                    int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
+                )
+            except (DataFetchError, TypeError, ValueError):
+                return GateDecision(False, "تعذر التحقق من سعر OANDA حديث؛ أُوقف النشر احترازياً.")
         return GateDecision(True)
     if provider == "yfinance":
         return GateDecision(
@@ -192,13 +208,14 @@ def _check_dxy(signal: TradeSignal, settings: Settings) -> GateDecision:
 
 
 def check_publish_allowed(
-    signal: TradeSignal, settings: Settings | None = None, *, now: datetime | None = None
+    signal: TradeSignal, settings: Settings | None = None, *, now: datetime | None = None,
+    live_quote=None,
 ) -> GateDecision:
     """Run every publish rule; the first failing rule wins. Errors fail closed."""
     settings = settings or get_settings()
     checks = (
         lambda: _check_market_hours(signal, settings, now),
-        lambda: _check_live_data_source(settings),
+        lambda: _check_live_data_source(settings, signal.symbol, live_quote),
         lambda: _check_news(signal, settings),
         lambda: _check_mtf(signal, settings),
         lambda: _check_dxy(signal, settings),

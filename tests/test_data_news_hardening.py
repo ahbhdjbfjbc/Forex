@@ -223,7 +223,17 @@ def test_strategy_label_is_honest_and_unknown_label_rejected():
 
 
 def test_tradingview_requires_internal_direction_and_price_corroboration(monkeypatch):
-    settings = SimpleNamespace(min_signal_confidence=0.7, min_risk_reward=2.0)
+    settings = SimpleNamespace(
+        min_signal_confidence=0.7, min_risk_reward=2.0,
+        data_provider="oanda", oanda_quote_max_age_seconds=30,
+    )
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        "src.data_provider.get_oanda_live_quote",
+        lambda *_args, **_kwargs: data_provider.LiveQuote(
+            "EUR_USD", 1.0849, 1.0851, now, "tradeable"
+        ),
+    )
     frame = pd.DataFrame(
         {"Open": [1.085], "High": [1.086], "Low": [1.084], "Close": [1.085], "Volume": [1]},
         index=pd.DatetimeIndex([pd.Timestamp.now(tz="UTC")]),

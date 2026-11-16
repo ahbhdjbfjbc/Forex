@@ -32,9 +32,13 @@ class DeliveryResult(dict):
     """Per-channel delivery flags plus an optional publish-gate block reason.
 
     Behaves exactly like the original dict for existing callers; a blocked
-    publication has every channel False and `blocked_reason` set."""
+    publication has every channel False and `blocked_reason` set. A successful
+    result also retains the exact signal that was charted and dispatched."""
 
-    blocked_reason: str | None = None
+    def __init__(self, *args, blocked_reason=None, final_signal=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.blocked_reason = blocked_reason
+        self.final_signal = final_signal
 
 # Public (imported by src/telegram_bot.py for the on-demand /scan report so
 # both message formats stay in sync instead of duplicating these labels).
@@ -449,7 +453,25 @@ def send_alert(
 
     from src.publish_gate import check_publish_allowed
 
-    decision = check_publish_allowed(signal, settings)
+    live_quote = None
+    if str(getattr(settings, "data_provider", "yfinance") or "").strip().lower() == "oanda":
+        try:
+            from src.data_provider import ensure_live_quote_fresh, get_oanda_live_quote
+            from src import risk
+
+            live_quote = get_oanda_live_quote(signal.symbol, settings)
+            ensure_live_quote_fresh(
+                live_quote,
+                int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
+            )
+            signal = risk.reprice_signal_to_quote(signal, live_quote, settings)
+        except Exception as exc:
+            logger.warning("refusing to publish without a fresh OANDA quote (%s)", type(exc).__name__)
+            blocked = DeliveryResult(telegram=False, discord=False, desktop=False, duplicate=False)
+            blocked.blocked_reason = "تعذر جلب سعر OANDA حي أو تحرك السعر بعيداً عن نقطة الدخول؛ لم تُرسل التوصية."
+            return blocked
+
+    decision = check_publish_allowed(signal, settings, live_quote=live_quote)
     if not decision.allowed:
         blocked = DeliveryResult(telegram=False, discord=False, desktop=False, duplicate=False)
         blocked.blocked_reason = decision.reason or "رفضها فحص النشر"
@@ -503,7 +525,7 @@ def send_alert(
             "no notification channel is configured/succeeded for %s %s signal",
             signal.symbol, signal.direction.value,
         )
-    return results
+    return DeliveryResult(results, final_signal=signal)
 
 
 def send_no_signal_alert(

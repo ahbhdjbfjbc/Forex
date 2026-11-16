@@ -277,7 +277,11 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
             continue
         if any(value for channel, value in delivery.items() if channel != "duplicate"):
             signals_sent += 1
-            execute_paper_trade(signal, settings)  # no-op unless ENABLE_PAPER_TRADING=true
+            final_signal = getattr(delivery, "final_signal", None)
+            if settings.enable_paper_trading and final_signal is None:
+                logger.error("skipping paper order: notifier did not return the published signal")
+            elif final_signal is not None:
+                execute_paper_trade(final_signal, settings)
 
     logger.info(
         "auto-scan cycle complete: %d/%d (symbol,timeframe) pairs returned data, "

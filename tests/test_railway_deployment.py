@@ -224,6 +224,7 @@ def test_control_panel_commands_are_registered_with_telegram_application() -> No
 
 def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
     import main as app
+    from src.notifier import DeliveryResult
 
     signal = SimpleNamespace(
         symbol="EURUSD", timeframe="1h", direction=SimpleNamespace(value="BUY"),
@@ -239,6 +240,7 @@ def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
     )
     alerts = []
     paper_trades = []
+    published_signal = SimpleNamespace(entry_price=1.0852)
 
     with app._auto_signal_lock:
         app._recent_auto_signal_keys.clear()
@@ -250,7 +252,10 @@ def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
     monkeypatch.setattr(app, "generate_signal", lambda *_args, **_kwargs: signal)
     monkeypatch.setattr(
         app, "send_alert",
-        lambda delivered, _settings, **_kwargs: alerts.append(delivered) or {"telegram": True},
+        lambda delivered, _settings, **_kwargs: (
+            alerts.append(delivered)
+            or DeliveryResult({"telegram": True}, final_signal=published_signal)
+        ),
     )
     monkeypatch.setattr(app, "execute_paper_trade", lambda *args, **_kwargs: paper_trades.append(args))
 
@@ -258,12 +263,14 @@ def test_qualified_live_signal_still_reaches_notifier(monkeypatch) -> None:
     app.run_scan_cycle(settings)
     assert len(alerts) == 1
     assert len(paper_trades) == 1
+    assert paper_trades[0][0] is published_signal
 
     # A newly closed candle is a new opportunity and must still be dispatched.
     frame.index = ["2026-10-30T17:00:00Z"]
     app.run_scan_cycle(settings)
     assert alerts == [signal, signal]
     assert len(paper_trades) == 2
+    assert paper_trades[1][0] is published_signal
 
 
 def test_auto_scan_skips_fx_signal_generation_when_market_is_closed(monkeypatch):

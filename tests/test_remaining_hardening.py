@@ -31,16 +31,28 @@ def reset_webhook_state():
 
 
 def test_webhook_enforces_per_peer_rate_limit(monkeypatch):
+    from datetime import datetime, timezone
+
+    from src.data_provider import LiveQuote
+
     monkeypatch.setattr(bridge, "_REQUEST_RATE_MAX", 2)
     monkeypatch.setattr(bridge, "get_settings", lambda: SimpleNamespace(
         webhook_shared_secret="test-secret-which-is-longer-than-32-chars",
         account_size_usd=10_000.0,
         risk_percent_per_trade=1.0,
         min_risk_reward=2.0,
+        data_provider="oanda",
+        oanda_quote_max_age_seconds=30,
     ))
     monkeypatch.setattr(bridge, "send_alert", lambda signal, **_kwargs: {
         "telegram": True, "discord": False, "desktop": False,
     })
+    monkeypatch.setattr(
+        "src.data_provider.get_oanda_live_quote",
+        lambda *_args, **_kwargs: LiveQuote(
+            "EUR_USD", 1.0849, 1.0851, datetime.now(timezone.utc), "tradeable"
+        ),
+    )
     monkeypatch.setattr(bridge, "_corroborate_alert", lambda alert: (
         bridge._alert_to_signal(alert),
         None,
@@ -52,12 +64,19 @@ def test_webhook_enforces_per_peer_rate_limit(monkeypatch):
     client = TestClient(bridge.app)
     base = {
         "ticker": "EURUSD", "timeframe": "15", "signal": "BUY",
+        "stop_loss": 1.083, "take_profit": 1.089, "take_profit_2": 1.091,
         "bar_time": int(time.time() * 1000),
         "secret": "test-secret-which-is-longer-than-32-chars",
     }
-    responses = [client.post("/webhook/tradingview", json={**base, "price": p})
+    def alert_payload(price):
+        return {
+            **base, "price": price, "stop_loss": price - 0.002,
+            "take_profit": price + 0.004, "take_profit_2": price + 0.006,
+        }
+
+    responses = [client.post("/webhook/tradingview", json=alert_payload(p))
                  for p in (1.085, 1.086)]
-    blocked = client.post("/webhook/tradingview", json={**base, "price": 1.087})
+    blocked = client.post("/webhook/tradingview", json=alert_payload(1.087))
     assert [r.status_code for r in responses] == [200, 200]
     assert blocked.status_code == 429
     assert int(blocked.headers["Retry-After"]) >= 1

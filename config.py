@@ -30,9 +30,13 @@ class Settings(BaseSettings):
     atr_expansion_multiplier: float = 1.5
     bb_squeeze_percentile: float = 20.0
 
-    # The current yfinance adapter supplies historical/delayed OHLCV; it is
-    # not verified real-time data and cannot pass the publication gate.
-    data_provider: str = "yfinance"
+    # OANDA is used only for read-only quotes and candles by the market-data
+    # adapter. Order execution remains a separate, practice-only module.
+    data_provider: str = "oanda"
+    oanda_api_token: str = ""
+    oanda_account_id: str = ""
+    oanda_environment: str = "practice"
+    oanda_quote_max_age_seconds: int = 30
     scan_interval_seconds: int = 300
 
     # 1-hour auto-scan scheduler (main.py): scans src.watchlist_store's
@@ -128,6 +132,21 @@ class Settings(BaseSettings):
     def _positive_intervals(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("scan intervals must be greater than zero")
+        return v
+
+    @field_validator("oanda_environment")
+    @classmethod
+    def _valid_oanda_environment(cls, v: str) -> str:
+        value = v.strip().lower()
+        if value not in {"practice", "live"}:
+            raise ValueError("oanda_environment must be 'practice' or 'live'")
+        return value
+
+    @field_validator("oanda_quote_max_age_seconds")
+    @classmethod
+    def _valid_oanda_quote_age(cls, v: int) -> int:
+        if not 1 <= v <= 120:
+            raise ValueError("oanda_quote_max_age_seconds must be between 1 and 120")
         return v
 
     @field_validator("ai_report_interval_hours")

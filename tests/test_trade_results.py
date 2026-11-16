@@ -67,6 +67,7 @@ def test_full_signal_chart_levels_and_final_outcome_use_the_configured_group(mon
     monkeypatch.setattr("src.publish_gate.check_publish_allowed", lambda *_a, **_k: GateDecision(True))
     settings = Settings(
         _env_file=None,
+        data_provider="yfinance",
         telegram_bot_token="1:x",
         telegram_chat_id="111",
         telegram_allowed_user_id="111",

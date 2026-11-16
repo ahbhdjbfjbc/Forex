@@ -139,9 +139,11 @@ class TradingViewAlert(BaseModel):
     secret: str | None = Field(default=None, repr=False, exclude=True, max_length=512)
     strategy: str | None = Field(default=None, max_length=64)
     stop_loss: float | None = Field(default=None, gt=0)
+    # `take_profit` is TP1 for backwards-compatible JSON naming.
     take_profit: float | None = Field(default=None, gt=0)
+    take_profit_2: float | None = Field(default=None, gt=0)
 
-    @field_validator("price", "stop_loss", "take_profit")
+    @field_validator("price", "stop_loss", "take_profit", "take_profit_2")
     @classmethod
     def _finite_positive_price(cls, value: float | None) -> float | None:
         if value is not None and (not math.isfinite(value) or value <= 0):

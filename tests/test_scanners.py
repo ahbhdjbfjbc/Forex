@@ -355,7 +355,11 @@ class TestNotifierFormatting:
 
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
+    from datetime import datetime, timezone
+
     from config import get_settings
+    from src.data_provider import LiveQuote
+    from src import tradingview_bridge
 
     get_settings.cache_clear()
     monkeypatch.setenv("WEBHOOK_SHARED_SECRET", "test-secret-which-is-longer-than-32-chars")
@@ -365,12 +369,18 @@ def client(monkeypatch) -> TestClient:
     monkeypatch.setattr(
         "src.tradingview_bridge._corroborate_alert",
         lambda alert: (
-            SimpleNamespace(),
+            tradingview_bridge._alert_to_signal(alert),
             None,
             pd.DataFrame(
                 {"Open": [alert.price], "High": [alert.price], "Low": [alert.price], "Close": [alert.price], "Volume": [1]},
                 index=pd.DatetimeIndex([pd.Timestamp.now(tz="UTC")]),
             ),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.data_provider.get_oanda_live_quote",
+        lambda symbol, *_args, **_kwargs: LiveQuote(
+            "EUR_USD", 1.0850, 1.0852, datetime.now(timezone.utc), "tradeable"
         ),
     )
     return TestClient(bridge_app)
@@ -391,6 +401,9 @@ class TestTradingViewBridge:
             "timeframe": "15m",
             "signal": "BUY",
             "price": 1.0850,
+            "stop_loss": 1.0820,
+            "take_profit": 1.0910,
+            "take_profit_2": 1.0970,
             "bar_time": int(time.time() * 1000),
             "secret": "test-secret-which-is-longer-than-32-chars",
         }

@@ -14,7 +14,10 @@ WEDNESDAY_NOON = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
 
 
 def _settings(**overrides):
-    base = dict(_env_file=None, enable_news_filter=False, enable_mtf_filter=False, enable_dxy_filter=False)
+    base = dict(
+        _env_file=None, data_provider="yfinance", enable_news_filter=False,
+        enable_mtf_filter=False, enable_dxy_filter=False,
+    )
     base.update(overrides)
     return Settings(**base)
 

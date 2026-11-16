@@ -24,6 +24,7 @@ import math
 import threading
 import time
 import asyncio
+from dataclasses import replace
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -114,12 +115,6 @@ def tradingview_heartbeat_ok(settings=None, now: datetime | None = None) -> tupl
     return True, "ok"
 
 
-DEFAULT_FALLBACK_SL_PIPS = 20.0  # FX fallback only
-# No standard pip convention exists for metals/crypto. Use conservative
-# price-relative fallback distances if TradingView omits stop_loss. These are
-# signal-generation defaults, not a claim about broker contract specifications.
-METAL_FALLBACK_SL_PERCENT = 0.5
-CRYPTO_FALLBACK_SL_PERCENT = 1.0
 _TIMEFRAME_DURATION = {
     "15m": timedelta(minutes=15),
     "30m": timedelta(minutes=30),
@@ -249,6 +244,8 @@ def _strategy_for_alert(strategy_name: str | None) -> StrategyType:
 def _corroborate_alert(alert: TradingViewAlert):
     """Require a fresh internal scan to confirm direction and approximate price."""
     settings = get_settings()
+    if str(getattr(settings, "data_provider", "") or "").strip().lower() != "oanda":
+        raise MarketDataUnavailable("TradingView alerts require DATA_PROVIDER=oanda")
     raw_symbol = alert.ticker.upper().replace("=X", "").replace("=F", "")
     symbol = sanitize_symbol(raw_symbol)
     if symbol is None:
@@ -265,11 +262,22 @@ def _corroborate_alert(alert: TradingViewAlert):
     if frame is None or frame.empty or "Close" not in frame.columns:
         raise MarketDataUnavailable(f"empty OHLCV data for {symbol}/{alert.timeframe}")
 
-    market_price = float(frame["Close"].iloc[-1])
+    try:
+        from src.data_provider import ensure_live_quote_fresh, get_oanda_live_quote
+
+        quote = get_oanda_live_quote(symbol, settings)
+        ensure_live_quote_fresh(
+            quote,
+            int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
+        )
+    except Exception as exc:
+        raise MarketDataUnavailable(f"fresh OANDA quote unavailable for {symbol}") from exc
+
+    market_price = quote.mid
     atr = float(regime_result.metrics.atr)
-    tolerance = max(abs(market_price) * 0.0002, atr * 0.25)
+    tolerance = max(quote.spread * 3.0, abs(market_price) * 0.0001, atr * 0.20)
     if not math.isfinite(market_price) or abs(alert.price - market_price) > tolerance:
-        raise AlertNotCorroborated("TradingView price does not match the fresh project market feed")
+        raise AlertNotCorroborated("TradingView price does not match the fresh OANDA bid/ask market")
 
     if alert.signal == "NONE":
         return None, regime_result, frame
@@ -278,6 +286,40 @@ def _corroborate_alert(alert: TradingViewAlert):
     if signal is None or signal.direction.value != alert.signal:
         raise AlertNotCorroborated("internal scanner did not produce a same-direction qualified signal")
     return signal, regime_result, frame
+
+
+def _apply_tradingview_levels(signal: TradeSignal, alert: TradingViewAlert, settings) -> TradeSignal:
+    """Use validated Pine levels after shifting them to the OANDA side quote."""
+    from src.data_provider import ensure_live_quote_fresh, get_oanda_live_quote
+
+    quote = get_oanda_live_quote(alert.ticker, settings)
+    ensure_live_quote_fresh(
+        quote,
+        int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
+    )
+    entry = quote.ask if signal.direction == TradeDirection.BUY else quote.bid
+    shift = entry - alert.price
+    adjusted_alert = alert.model_copy(update={
+        "price": entry,
+        "stop_loss": float(alert.stop_loss) + shift,
+        "take_profit": float(alert.take_profit) + shift,
+        "take_profit_2": float(alert.take_profit_2) + shift,
+    })
+    levels = _alert_to_signal(adjusted_alert)
+    return replace(
+        signal,
+        entry_price=levels.entry_price,
+        stop_loss_price=levels.stop_loss_price,
+        stop_loss_pips=levels.stop_loss_pips,
+        take_profit_1_price=levels.take_profit_1_price,
+        take_profit_1_pips=levels.take_profit_1_pips,
+        take_profit_1_rr=levels.take_profit_1_rr,
+        take_profit_2_price=levels.take_profit_2_price,
+        take_profit_2_pips=levels.take_profit_2_pips,
+        take_profit_2_rr=levels.take_profit_2_rr,
+        risk=levels.risk,
+        rationale=f"{signal.rationale}; tested Pine levels rebased to OANDA {quote.instrument} quote",
+    )
 
 
 def _enforce_request_rate_limit(client_host: str) -> None:
@@ -332,15 +374,12 @@ def _alert_to_signal(alert: TradingViewAlert) -> TradeSignal:
     if not math.isfinite(alert.price) or alert.price <= 0:
         raise HTTPException(status_code=422, detail="price must be a finite positive number")
 
-    if alert.stop_loss is not None:
-        stop_loss_price = float(alert.stop_loss)
-    elif kind == "FX":
-        offset = DEFAULT_FALLBACK_SL_PIPS * risk.pip_size(alert.ticker)
-        stop_loss_price = alert.price - offset if direction == TradeDirection.BUY else alert.price + offset
-    else:
-        fallback_percent = METAL_FALLBACK_SL_PERCENT if kind == "METAL" else CRYPTO_FALLBACK_SL_PERCENT
-        offset = alert.price * fallback_percent / 100.0
-        stop_loss_price = alert.price - offset if direction == TradeDirection.BUY else alert.price + offset
+    if alert.stop_loss is None or alert.take_profit is None or alert.take_profit_2 is None:
+        raise HTTPException(
+            status_code=422,
+            detail="stop_loss, take_profit and take_profit_2 are required; no default levels are applied",
+        )
+    stop_loss_price = float(alert.stop_loss)
 
     if not math.isfinite(stop_loss_price) or stop_loss_price <= 0:
         raise HTTPException(status_code=422, detail="stop_loss must be a finite positive number")
@@ -351,25 +390,18 @@ def _alert_to_signal(alert: TradingViewAlert) -> TradeSignal:
         raise HTTPException(status_code=422, detail="SELL stop_loss must be above entry price")
 
     stop_distance = abs(alert.price - stop_loss_price)
-    if alert.take_profit is not None:
-        tp1_price = float(alert.take_profit)
-        if direction == TradeDirection.BUY and tp1_price <= alert.price:
-            raise HTTPException(status_code=422, detail="BUY take_profit must be above entry price")
-        if direction == TradeDirection.SELL and tp1_price >= alert.price:
-            raise HTTPException(status_code=422, detail="SELL take_profit must be below entry price")
-        tp1_rr = abs(tp1_price - alert.price) / stop_distance
-        if tp1_rr < settings.min_risk_reward:
-            raise HTTPException(status_code=422, detail="take_profit does not meet configured minimum risk/reward")
-        tp2_rr = max(settings.min_risk_reward + 1.0, tp1_rr + 1.0)
-        target_distance = stop_distance * tp2_rr
-        tp2_price = alert.price + target_distance if direction == TradeDirection.BUY else alert.price - target_distance
-    else:
-        tp1_rr = settings.min_risk_reward
-        tp2_rr = settings.min_risk_reward + 1.0
-        tp1_price, tp2_price = risk.compute_rr_targets(
-            alert.price, stop_loss_price, direction,
-            rr_tp1=tp1_rr, rr_tp2=tp2_rr,
-        )
+    tp1_price = float(alert.take_profit)
+    tp2_price = float(alert.take_profit_2)
+    if direction == TradeDirection.BUY and not (alert.price < tp1_price < tp2_price):
+        raise HTTPException(status_code=422, detail="BUY targets must be above entry and TP2 above TP1")
+    if direction == TradeDirection.SELL and not (tp2_price < tp1_price < alert.price):
+        raise HTTPException(status_code=422, detail="SELL targets must be below entry and TP2 below TP1")
+    tp1_rr = abs(tp1_price - alert.price) / stop_distance
+    tp2_rr = abs(tp2_price - alert.price) / stop_distance
+    if tp1_rr < settings.min_risk_reward:
+        raise HTTPException(status_code=422, detail="TP1 does not meet configured minimum risk/reward")
+    if tp2_rr <= tp1_rr:
+        raise HTTPException(status_code=422, detail="TP2 must have a greater risk/reward than TP1")
 
     if (not math.isfinite(tp1_price) or not math.isfinite(tp2_price)
             or tp1_price <= 0 or tp2_price <= 0):
@@ -429,6 +461,56 @@ def _alert_to_signal(alert: TradingViewAlert) -> TradeSignal:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/health/market")
+def market_health(
+    symbol: str = "EURUSD",
+    x_webhook_secret: str | None = Header(default=None),
+):
+    """Secret-protected live OANDA diagnostic; never submits an order."""
+    _verify_secret(x_webhook_secret)
+    settings = get_settings()
+    if str(getattr(settings, "data_provider", "") or "").strip().lower() != "oanda":
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "reason": "DATA_PROVIDER is not oanda"},
+        )
+    try:
+        from src.data_provider import (
+            DataFetchError,
+            ensure_live_quote_fresh,
+            get_oanda_live_quote,
+        )
+
+        quote = get_oanda_live_quote(symbol, settings, use_cache=False)
+        ensure_live_quote_fresh(
+            quote,
+            int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
+        )
+    except (DataFetchError, TypeError, ValueError) as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unavailable",
+                "reason": str(exc)[:200],
+                "provider": "oanda",
+            },
+        )
+    age_seconds = max(
+        0.0,
+        (datetime.now(timezone.utc) - quote.observed_at).total_seconds(),
+    )
+    return {
+        "status": "ok",
+        "provider": "oanda",
+        "instrument": quote.instrument,
+        "bid": quote.bid,
+        "ask": quote.ask,
+        "observed_at": quote.observed_at.isoformat(),
+        "age_seconds": round(age_seconds, 3),
+        "trade_status": quote.status,
+    }
 
 
 def _recent_alerts_payload() -> list[dict]:
@@ -513,9 +595,10 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
 
     flush_pending_signal_outcomes()
     try:
-        # TradingView is a confirmation input only. The recommendation below
-        # is always the internally generated, risk-checked signal from the
-        # same fresh OHLCV frame, never the raw webhook price/strategy.
+        # The scanner must independently confirm the signal direction and
+        # current price from fresh OANDA-backed OHLCV/quote data. Explicit Pine
+        # stop/target levels are applied only after that corroboration and are
+        # rebased to the current side-specific OANDA quote below.
         signal, _regime_result, frame = await asyncio.to_thread(_corroborate_alert, alert)
     except AlertNotCorroborated:
         _RECENT_ALERTS.append(alert.model_copy(update={"secret": None}))
@@ -560,8 +643,27 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
         return WebhookAck(status="reset", detail="fresh market data confirmed no active TradingView setup")
 
     try:
-        dispatch_results = send_alert(
-            signal, source="tradingview", entry_bar_id=str(frame.index[-1]), market_frame=frame
+        signal = await asyncio.to_thread(
+            _apply_tradingview_levels, signal, alert, get_settings()
+        )
+    except Exception as exc:
+        _release_alert_fingerprint(fingerprint)
+        logger.warning("could not apply validated TradingView levels for %s (%s)", alert.ticker, type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content=WebhookAck(
+                status="live_quote_unavailable",
+                detail="fresh OANDA quote or validated TradingView levels unavailable; no recommendation was published",
+            ).model_dump(),
+        )
+
+    try:
+        dispatch_results = await asyncio.to_thread(
+            send_alert,
+            signal,
+            source="tradingview",
+            entry_bar_id=str(frame.index[-1]),
+            market_frame=frame,
         )
     except Exception as exc:
         _release_alert_fingerprint(fingerprint)

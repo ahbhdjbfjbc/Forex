@@ -27,13 +27,28 @@ def _mock_corroboration(alert):
 
 @pytest.fixture(autouse=True)
 def safe_settings(monkeypatch):
+    from datetime import datetime, timezone
+
+    from src.data_provider import LiveQuote
+
     settings = SimpleNamespace(
         webhook_shared_secret="test-secret-which-is-longer-than-32-chars",
         account_size_usd=10_000.0,
         risk_percent_per_trade=1.0,
         min_risk_reward=2.0,
+        data_provider="oanda",
+        oanda_quote_max_age_seconds=30,
     )
     monkeypatch.setattr(bridge, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "src.data_provider.get_oanda_live_quote",
+        lambda symbol, *_args, **_kwargs: LiveQuote(
+            "EUR_USD" if "EUR" in symbol else "XAU_USD",
+            1.0849 if "EUR" in symbol else 4299.9,
+            1.0851 if "EUR" in symbol else 4300.1,
+            datetime.now(timezone.utc), "tradeable",
+        ),
+    )
     monkeypatch.setattr(bridge, "_corroborate_alert", _mock_corroboration)
     bridge._RECENT_ALERTS.clear()
     with bridge._ALERT_DEDUPE_LOCK:
@@ -71,9 +86,10 @@ def test_default_or_short_shared_secret_fails_closed(monkeypatch, secret):
     assert getattr(exc.value, "status_code", None) == 403
 
 
-def test_fx_fallback_stop_and_lot_size_are_pip_based():
+def test_explicit_stop_and_targets_use_pip_based_lot_size():
     signal = bridge._alert_to_signal(TradingViewAlert(
         ticker="EURUSD", timeframe="15", signal="BUY", price=1.0850,
+        stop_loss=1.0830, take_profit=1.0910, take_profit_2=1.0970,
         secret="test-secret-which-is-longer-than-32-chars",
     ))
     assert signal.stop_loss_price == pytest.approx(1.0830)
@@ -82,27 +98,91 @@ def test_fx_fallback_stop_and_lot_size_are_pip_based():
     assert signal.risk.pip_value_per_lot > 0
 
 
+def test_pine_levels_are_rebased_to_fresh_oanda_ask_without_default_levels(monkeypatch):
+    from datetime import datetime, timezone
+
+    from src.data_provider import LiveQuote
+    from tests.test_signal_lifecycle import make_signal
+
+    alert = TradingViewAlert(
+        ticker="EURUSD", timeframe="15", signal="BUY", price=1.0850,
+        stop_loss=1.0830, take_profit=1.0890, take_profit_2=1.0910,
+        secret="test-secret-which-is-longer-than-32-chars",
+    )
+    signal = make_signal(entry=1.0850)
+    quote = LiveQuote("EUR_USD", 1.0853, 1.0855, datetime.now(timezone.utc), "tradeable")
+    monkeypatch.setattr("src.data_provider.get_oanda_live_quote", lambda *_a, **_k: quote)
+
+    adjusted = bridge._apply_tradingview_levels(signal, alert, bridge.get_settings())
+
+    assert adjusted.entry_price == pytest.approx(1.0855)
+    assert adjusted.stop_loss_price == pytest.approx(1.0835)
+    assert adjusted.take_profit_1_price == pytest.approx(1.0895)
+    assert adjusted.take_profit_2_price == pytest.approx(1.0915)
+    assert adjusted.take_profit_1_rr == pytest.approx(2.0)
+    assert adjusted.take_profit_2_rr == pytest.approx(3.0)
+
+
+def test_pine_sell_levels_are_rebased_to_fresh_oanda_bid(monkeypatch):
+    from datetime import datetime, timezone
+
+    from src.data_provider import LiveQuote
+    from src.models import TradeDirection
+    from tests.test_signal_lifecycle import make_signal
+
+    alert = TradingViewAlert(
+        ticker="EURUSD", timeframe="15", signal="SELL", price=1.0850,
+        stop_loss=1.0870, take_profit=1.0810, take_profit_2=1.0790,
+        secret="test-secret-which-is-longer-than-32-chars",
+    )
+    signal = make_signal(entry=1.0850, direction=TradeDirection.SELL)
+    quote = LiveQuote("EUR_USD", 1.0845, 1.0847, datetime.now(timezone.utc), "tradeable")
+    monkeypatch.setattr("src.data_provider.get_oanda_live_quote", lambda *_a, **_k: quote)
+
+    adjusted = bridge._apply_tradingview_levels(signal, alert, bridge.get_settings())
+
+    assert adjusted.entry_price == pytest.approx(1.0845)
+    assert adjusted.stop_loss_price == pytest.approx(1.0865)
+    assert adjusted.take_profit_1_price == pytest.approx(1.0805)
+    assert adjusted.take_profit_2_price == pytest.approx(1.0785)
+    assert adjusted.take_profit_1_rr == pytest.approx(2.0)
+    assert adjusted.take_profit_2_rr == pytest.approx(3.0)
+
+
+def test_pine_webhook_contract_serializes_explicit_stop_and_two_targets():
+    from pathlib import Path
+
+    pine = Path(__file__).resolve().parents[1] / "pine_script" / "tv_indicator.pine"
+    source = pine.read_text(encoding="utf-8")
+
+    assert '"stop_loss":' in source
+    assert '"take_profit":' in source
+    assert '"take_profit_2":' in source
+    assert "longSL  = close - atrVal * slAtrMultiplier" in source
+    assert "shortSL  = close + atrVal * slAtrMultiplier" in source
+    assert "alert(longMessage, alert.freq_once_per_bar_close)" in source
+    assert "alert(shortMessage, alert.freq_once_per_bar_close)" in source
+
+
 @pytest.mark.parametrize("ticker,entry,expected_distance,expected_units", [
     ("XAUUSD", 4300.0, 21.5, 100.0 / 21.5),
     ("BTCUSD", 100000.0, 1000.0, 100.0 / 1000.0),
 ])
-def test_non_fx_fallback_uses_price_distance_and_units(ticker, entry, expected_distance, expected_units):
-    signal = bridge._alert_to_signal(TradingViewAlert(
-        ticker=ticker, timeframe="15", signal="BUY", price=entry,
-        secret="test-secret-which-is-longer-than-32-chars",
-    ))
-    assert signal.stop_loss_price == pytest.approx(entry - expected_distance)
-    assert signal.stop_loss_pips == pytest.approx(expected_distance)
-    assert signal.risk.pip_value_per_lot == 0.0
-    assert signal.risk.lot_size == pytest.approx(expected_units, rel=1e-3)
-    assert signal.take_profit_1_price > entry
+def test_missing_tradingview_levels_are_rejected_without_defaults(ticker, entry, expected_distance, expected_units):
+    with pytest.raises(Exception) as exc:
+        bridge._alert_to_signal(TradingViewAlert(
+            ticker=ticker, timeframe="15", signal="BUY", price=entry,
+            secret="test-secret-which-is-longer-than-32-chars",
+        ))
+    assert getattr(exc.value, "status_code", None) == 422
 
 
 def test_wrong_side_stop_is_rejected():
     with pytest.raises(Exception) as exc:
         bridge._alert_to_signal(TradingViewAlert(
             ticker="XAUUSD", timeframe="15", signal="BUY", price=4300.0,
-            stop_loss=4310.0, secret="test-secret-which-is-longer-than-32-chars",
+            stop_loss=4310.0, take_profit=4320.0, take_profit_2=4330.0,
+            secret="test-secret-which-is-longer-than-32-chars",
         ))
     assert getattr(exc.value, "status_code", None) == 422
 
@@ -127,7 +207,8 @@ def test_webhook_rejects_wrong_side_stop_without_storing_alert(monkeypatch):
     client = TestClient(bridge.app)
     response = client.post("/webhook/tradingview", json={
         "ticker": "XAUUSD", "timeframe": "15", "signal": "BUY", "price": 4300,
-        "stop_loss": 4310, "bar_time": _fresh_bar_time(),
+        "stop_loss": 4310, "take_profit": 4320, "take_profit_2": 4330,
+        "bar_time": _fresh_bar_time(),
         "secret": "test-secret-which-is-longer-than-32-chars",
     })
     assert response.status_code == 422
@@ -142,6 +223,7 @@ def test_webhook_returns_multistatus_when_no_channel_reports_delivery(monkeypatc
     client = TestClient(bridge.app)
     response = client.post("/webhook/tradingview", json={
         "ticker": "EURUSD", "timeframe": "15", "signal": "BUY", "price": 1.085,
+        "stop_loss": 1.083, "take_profit": 1.089, "take_profit_2": 1.091,
         "bar_time": _fresh_bar_time(),
         "secret": "test-secret-which-is-longer-than-32-chars",
     })
@@ -158,6 +240,7 @@ def test_webhook_reports_success_when_a_channel_reports_delivery(monkeypatch):
     client = TestClient(bridge.app)
     response = client.post("/webhook/tradingview", json={
         "ticker": "EURUSD", "timeframe": "15", "signal": "BUY", "price": 1.085,
+        "stop_loss": 1.083, "take_profit": 1.089, "take_profit_2": 1.091,
         "bar_time": _fresh_bar_time(),
         "secret": "test-secret-which-is-longer-than-32-chars",
     })
@@ -174,6 +257,7 @@ def test_webhook_rejects_exact_short_window_replay(monkeypatch):
     client = TestClient(bridge.app)
     payload = {
         "ticker": "EURUSD", "timeframe": "15", "signal": "BUY", "price": 1.085,
+        "stop_loss": 1.083, "take_profit": 1.089, "take_profit_2": 1.091,
         "bar_time": _fresh_bar_time(),
         "secret": "test-secret-which-is-longer-than-32-chars",
     }
@@ -186,15 +270,26 @@ def test_webhook_rejects_exact_short_window_replay(monkeypatch):
 
 
 def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+
     from fastapi.testclient import TestClient
 
     from config import Settings
     from src import charting, notifier
+    from src.data_provider import LiveQuote
     from src.signal_lifecycle import SignalLifecycleStore
 
     lifecycle = SignalLifecycleStore(tmp_path / "signal-state.sqlite3")
     settings = Settings(_env_file=None, min_risk_reward=2.0)
     messages = []
+    live = {"entry": 1.085}
+    monkeypatch.setattr(
+        "src.data_provider.get_oanda_live_quote",
+        lambda *_args, **_kwargs: LiveQuote(
+            "EUR_USD", live["entry"] - 0.0001, live["entry"],
+            datetime.now(timezone.utc), "tradeable",
+        ),
+    )
     monkeypatch.setattr(bridge, "signal_lifecycle", lifecycle)
     monkeypatch.setattr(notifier, "signal_lifecycle", lifecycle)
     monkeypatch.setattr(notifier, "get_settings", lambda: settings)
@@ -227,10 +322,22 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
         "secret": "test-secret-which-is-longer-than-32-chars",
     }
 
-    first = client.post("/webhook/tradingview", json={**base, "price": 1.085})
-    repeated = client.post("/webhook/tradingview", json={**base, "price": 1.086})
-    closed = client.post("/webhook/tradingview", json={**base, "price": 1.092})
-    still_blocked = client.post("/webhook/tradingview", json={**base, "price": 1.093})
+    def alert_payload(price):
+        return {
+            **base,
+            "price": price,
+            "stop_loss": price - 0.002,
+            "take_profit": price + 0.004,
+            "take_profit_2": price + 0.006,
+        }
+
+    live["entry"] = 1.085
+    first = client.post("/webhook/tradingview", json=alert_payload(1.085))
+    live["entry"] = 1.086
+    repeated = client.post("/webhook/tradingview", json=alert_payload(1.086))
+    live["entry"] = 1.092
+    closed = client.post("/webhook/tradingview", json=alert_payload(1.092))
+    still_blocked = client.post("/webhook/tradingview", json=alert_payload(1.093))
 
     assert first.json()["status"] == "ok"
     assert repeated.json()["status"] == "duplicate_suppressed"
@@ -246,7 +353,7 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
         json={**base, "signal": "NONE", "price": 1.093, "bar_time": _fresh_bar_time()},
     )
     next_setup = client.post(
-        "/webhook/tradingview", json={**base, "price": 1.094, "bar_time": _fresh_bar_time()}
+        "/webhook/tradingview", json={**alert_payload(1.094), "bar_time": _fresh_bar_time()}
     )
     assert reset.json()["status"] == "reset"
     assert next_setup.json()["status"] == "ok"
@@ -265,7 +372,7 @@ def test_tradingview_bar_time_accepts_unix_milliseconds():
 def test_explicit_take_profit_is_validated_and_used():
     signal = bridge._alert_to_signal(TradingViewAlert(
         ticker="EURUSD", timeframe="15", signal="BUY", price=1.085,
-        stop_loss=1.083, take_profit=1.091,
+        stop_loss=1.083, take_profit=1.091, take_profit_2=1.097,
         secret="test-secret-which-is-longer-than-32-chars",
     ))
     assert signal.take_profit_1_price == pytest.approx(1.091)

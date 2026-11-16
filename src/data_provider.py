@@ -1,23 +1,27 @@
 """OHLCV data acquisition.
 
-`yfinance` is the primary source because it returns full historical bars,
-which `indicators.py` needs to compute ADX/EMA/ATR/BB over a lookback window.
-`tradingview_ta` is offered as a lightweight secondary/confirmation source —
-it only exposes a single current-bar analysis snapshot (no history), so it
-cannot replace yfinance as the primary feed, but it's useful to sanity-check
-a regime call against TradingView's own server-side indicator values.
+`oanda` is the configured live-source adapter: it fetches completed v20
+midpoint candles and separate timestamped account Bid/Ask quotes. `yfinance`
+remains available only when explicitly selected, and its historical/delayed
+bars are rejected by the live publication gate. `tradingview_ta` is optional
+confirmation only and is not a price-data source for publication.
 
-Every public function fails soft: on network errors, rate limits, or missing
-data it logs and returns `None` (or an empty frame) rather than raising, so
-one bad symbol never kills a full watchlist scan.
+OHLCV fetches fail soft and return `None` when a symbol cannot be loaded, so
+one bad symbol never kills a full watchlist scan. Current-quote calls raise a
+typed `DataFetchError`; publication and webhook boundaries catch it and fail
+closed rather than silently falling back to another price source.
 """
 from __future__ import annotations
 
 import logging
+import math
+import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import numpy as np
 import pandas as pd
 
@@ -39,6 +43,21 @@ _MAX_PERIOD = {
     "1d": "5y",
 }
 _RESAMPLE_RULE = {"4h": "4h"}
+_OANDA_REST_URLS = {
+    "practice": "https://api-fxpractice.oanda.com",
+    "live": "https://api-fxtrade.oanda.com",
+}
+_OANDA_GRANULARITIES = {"15m": "M15", "30m": "M30", "1h": "H1", "4h": "H4", "1d": "D"}
+_OANDA_CURRENCIES = frozenset({
+    "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "CNY", "CNH",
+    "HKD", "SGD", "MXN", "ZAR", "TRY", "NOK", "SEK", "DKK", "PLN", "CZK",
+    "HUF", "ILS", "THB", "INR", "KRW", "PHP", "IDR", "MYR", "TWD", "BRL",
+    "RUB", "AED", "SAR", "QAR", "KWD", "BHD", "OMR", "CLP", "COP", "PEN",
+    "ARS", "RON", "ISK",
+})
+_OANDA_QUOTE_CACHE: dict[tuple[str, str, str], tuple[float, "LiveQuote"]] = {}
+_OANDA_QUOTE_CACHE_LOCK = threading.Lock()
+_OANDA_QUOTE_CACHE_SECONDS = 1.0
 
 REQUIRED_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
@@ -52,6 +71,173 @@ class OHLCVRequest:
     symbol: str
     timeframe: str
     min_bars: int = 210  # enough for EMA200 + warm-up
+
+
+@dataclass(frozen=True)
+class LiveQuote:
+    """OANDA top-of-book snapshot; read-only and never an execution receipt."""
+
+    instrument: str
+    bid: float
+    ask: float
+    observed_at: datetime
+    status: str
+
+    @property
+    def mid(self) -> float:
+        return (self.bid + self.ask) / 2.0
+
+    @property
+    def spread(self) -> float:
+        return self.ask - self.bid
+
+
+def _oanda_instrument(symbol: str) -> str:
+    raw = str(symbol).upper().strip()
+    if ":" in raw:
+        raw = raw.rsplit(":", 1)[-1]
+    if raw in {"GC=F", "GC"}:
+        raw = "XAUUSD"
+    elif raw in {"SI=F", "SI"}:
+        raw = "XAGUSD"
+    normalized = raw.replace("=X", "").replace("/", "").replace("_", "")
+    if not re.fullmatch(r"[A-Z]{6}", normalized):
+        raise DataFetchError(f"unsupported OANDA instrument {symbol!r}")
+    base, quote = normalized[:3], normalized[3:]
+    if normalized not in {"XAUUSD", "XAGUSD"} and (
+        base == quote or base not in _OANDA_CURRENCIES or quote not in _OANDA_CURRENCIES
+    ):
+        raise DataFetchError(f"unsupported OANDA currency pair {normalized}")
+    return f"{base}_{quote}"
+
+
+def _oanda_credentials(settings=None) -> tuple[str, str, str]:
+    if settings is None:
+        from config import get_settings
+
+        settings = get_settings()
+    token = str(getattr(settings, "oanda_api_token", "") or "").strip()
+    account_id = str(getattr(settings, "oanda_account_id", "") or "").strip()
+    environment = str(getattr(settings, "oanda_environment", "practice") or "practice").strip().lower()
+    if not token:
+        raise DataFetchError("OANDA_API_TOKEN is not configured")
+    if environment not in _OANDA_REST_URLS:
+        raise DataFetchError("OANDA_ENVIRONMENT must be live or practice")
+    return token, account_id, _OANDA_REST_URLS[environment]
+
+
+def fetch_ohlcv_oanda(request: OHLCVRequest, settings=None) -> pd.DataFrame:
+    """Fetch completed midpoint candles from OANDA v20; never falls back to Yahoo."""
+    token, _account_id, base_url = _oanda_credentials(settings)
+    instrument = _oanda_instrument(request.symbol)
+    granularity = _OANDA_GRANULARITIES.get(request.timeframe)
+    if granularity is None:
+        raise DataFetchError(f"unsupported OANDA timeframe {request.timeframe!r}")
+    count = min(5000, max(250, int(request.min_bars) + 10))
+    try:
+        response = httpx.get(
+            f"{base_url}/v3/instruments/{instrument}/candles",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"price": "M", "granularity": granularity, "count": count, "smooth": "false"},
+            timeout=5.0,
+        )
+    except httpx.HTTPError as exc:
+        raise DataFetchError(f"OANDA candles request failed ({type(exc).__name__})") from exc
+    if response.status_code != 200:
+        raise DataFetchError(f"OANDA candles request failed (HTTP {response.status_code})")
+    try:
+        payload = response.json()
+        candles = payload.get("candles") if isinstance(payload, dict) else None
+    except (ValueError, TypeError) as exc:
+        raise DataFetchError("OANDA returned invalid candle JSON") from exc
+    if not isinstance(candles, list):
+        raise DataFetchError("OANDA candle response has no candle list")
+
+    rows: list[dict[str, float]] = []
+    stamps: list[pd.Timestamp] = []
+    for candle in candles:
+        if not isinstance(candle, dict) or candle.get("complete") is not True:
+            continue
+        mid = candle.get("mid")
+        if not isinstance(mid, dict):
+            continue
+        try:
+            stamp = pd.to_datetime(candle["time"], utc=True, errors="raise")
+            row = {
+                "Open": float(mid["o"]), "High": float(mid["h"]),
+                "Low": float(mid["l"]), "Close": float(mid["c"]),
+                "Volume": float(candle.get("volume", 0)),
+            }
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise DataFetchError("OANDA returned a malformed completed candle") from exc
+        stamps.append(stamp)
+        rows.append(row)
+    if not rows:
+        raise DataFetchError(f"OANDA returned no completed candles for {instrument}/{request.timeframe}")
+    frame = pd.DataFrame(rows, index=pd.DatetimeIndex(stamps, name="Datetime"))
+    frame = _validate(frame, request)
+    _ensure_fresh(frame, request)
+    return frame
+
+
+def get_oanda_live_quote(symbol: str, settings=None, *, use_cache: bool = True) -> LiveQuote:
+    """Return a fresh read-only OANDA bid/ask quote for a supported instrument."""
+    token, account_id, base_url = _oanda_credentials(settings)
+    if not account_id:
+        raise DataFetchError("OANDA_ACCOUNT_ID is required for current pricing")
+    instrument = _oanda_instrument(symbol)
+    cache_key = (base_url, account_id, instrument)
+    now_monotonic = time.monotonic()
+    if use_cache:
+        with _OANDA_QUOTE_CACHE_LOCK:
+            cached = _OANDA_QUOTE_CACHE.get(cache_key)
+            if cached and now_monotonic - cached[0] <= _OANDA_QUOTE_CACHE_SECONDS:
+                return cached[1]
+    try:
+        response = httpx.get(
+            f"{base_url}/v3/accounts/{account_id}/pricing",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"instruments": instrument},
+            timeout=2.5,
+        )
+    except httpx.HTTPError as exc:
+        raise DataFetchError(f"OANDA quote request failed ({type(exc).__name__})") from exc
+    if response.status_code != 200:
+        raise DataFetchError(f"OANDA quote request failed (HTTP {response.status_code})")
+    try:
+        body = response.json()
+        items = body.get("prices") if isinstance(body, dict) else None
+        item = next(
+            price for price in items or []
+            if isinstance(price, dict) and price.get("instrument") == instrument
+        )
+        bid = float(item["bids"][0]["price"])
+        ask = float(item["asks"][0]["price"])
+        observed_at = datetime.fromisoformat(str(item["time"]).replace("Z", "+00:00"))
+        status = str(item.get("status", "unknown"))
+    except (ValueError, TypeError, KeyError, IndexError, StopIteration) as exc:
+        raise DataFetchError("OANDA returned a malformed or incomplete quote") from exc
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    else:
+        observed_at = observed_at.astimezone(timezone.utc)
+    if not all(math.isfinite(value) and value > 0 for value in (bid, ask)) or ask < bid:
+        raise DataFetchError("OANDA returned invalid bid/ask values")
+    quote = LiveQuote(instrument, bid, ask, observed_at, status)
+    if use_cache:
+        with _OANDA_QUOTE_CACHE_LOCK:
+            _OANDA_QUOTE_CACHE[cache_key] = (time.monotonic(), quote)
+    return quote
+
+
+def ensure_live_quote_fresh(quote: LiveQuote, max_age_seconds: int = 30,
+                            now: datetime | None = None) -> None:
+    current = now or datetime.now(timezone.utc)
+    age = (current - quote.observed_at).total_seconds()
+    if age < -5 or age > max_age_seconds:
+        raise DataFetchError("OANDA quote is in the future or outside the freshness limit")
+    if quote.status.lower() != "tradeable":
+        raise DataFetchError("OANDA instrument is not tradeable at the quote timestamp")
 
 
 def _resample(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
@@ -98,11 +284,11 @@ def _validate(df: pd.DataFrame, request: OHLCVRequest) -> pd.DataFrame:
 
 
 _MAX_BAR_AGE = {
-    "15m": timedelta(minutes=90),
-    "30m": timedelta(hours=3),
-    "1h": timedelta(hours=6),
-    "4h": timedelta(hours=18),
-    "1d": timedelta(days=3),
+    "15m": timedelta(minutes=25),
+    "30m": timedelta(minutes=45),
+    "1h": timedelta(hours=1, minutes=15),
+    "4h": timedelta(hours=4, minutes=15),
+    "1d": timedelta(hours=30),
 }
 
 
@@ -176,11 +362,15 @@ def fetch_ohlcv(request: OHLCVRequest) -> pd.DataFrame | None:
     try:
         from config import get_settings
 
-        provider = str(get_settings().data_provider).strip().lower()
-        if provider != "yfinance":
+        settings = get_settings()
+        provider = str(settings.data_provider).strip().lower()
+        if provider == "oanda":
+            frame = fetch_ohlcv_oanda(request, settings)
+        elif provider == "yfinance":
+            frame = fetch_ohlcv_yfinance(request)
+        else:
             logger.error("unsupported OHLCV provider %r; no recommendations will be produced", provider)
             return None
-        frame = fetch_ohlcv_yfinance(request)
         if frame is None:
             return None
         _ensure_fresh(frame, request)
@@ -200,8 +390,8 @@ def fetch_tv_confirmation(symbol: str, timeframe: str) -> dict | None:
 
     Returns a flat dict of indicator name -> value (e.g. "ADX", "RSI",
     "EMA20") or None if the symbol/exchange pairing can't be resolved or the
-    request fails. Never used as the sole source of truth — yfinance-derived
-    OHLCV remains authoritative for regime/strategy math.
+    request fails. Never used as the sole source of truth; the selected OHLCV
+    provider remains authoritative for regime/strategy math.
     """
     try:
         from tradingview_ta import TA_Handler, Interval

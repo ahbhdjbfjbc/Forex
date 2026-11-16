@@ -31,6 +31,9 @@ bbSqueezePct     = input.float(20.0, "BB Squeeze Percentile", group = grp_regime
 
 webhookSecret = input.string("change-me-to-a-long-random-string", "Webhook Shared Secret", group = grp_alert)
 enableAlerts  = input.bool(true, "Enable Alert Firing", group = grp_alert)
+slAtrMultiplier = input.float(1.5, "Stop ATR Multiplier", minval = 0.1, step = 0.1, group = grp_alert)
+tp1RR = input.float(2.0, "Target 1 Risk/Reward", minval = 0.1, step = 0.1, group = grp_alert)
+tp2RR = input.float(3.0, "Target 2 Risk/Reward", minval = 0.2, step = 0.1, group = grp_alert)
 
 // ---------------------------------------------------------------------------
 // Core indicators
@@ -114,8 +117,15 @@ plotshape(shortSignal, title = "Short Trigger", style = shape.triangledown, loca
 // ---------------------------------------------------------------------------
 // Webhook alert payloads — match src/models.py TradingViewAlert schema
 // ---------------------------------------------------------------------------
-longMessage  = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe.period + '", "bar_time": ' + str.tostring(time) + ', "signal": "BUY", "price": ' + str.tostring(close) + ', "secret": "' + webhookSecret + '", "strategy": "pine_bridge"}'
-shortMessage = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe.period + '", "bar_time": ' + str.tostring(time) + ', "signal": "SELL", "price": ' + str.tostring(close) + ', "secret": "' + webhookSecret + '", "strategy": "pine_bridge"}'
+longSL  = close - atrVal * slAtrMultiplier
+longTP1 = close + (close - longSL) * tp1RR
+longTP2 = close + (close - longSL) * tp2RR
+shortSL  = close + atrVal * slAtrMultiplier
+shortTP1 = close - (shortSL - close) * tp1RR
+shortTP2 = close - (shortSL - close) * tp2RR
+makeMessage(string side, float stop, float target1, float target2) => '{"ticker":"' + syminfo.ticker + '","timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) + ',"signal":"' + side + '","price":' + str.tostring(close, format.mintick) + ',"stop_loss":' + str.tostring(stop, format.mintick) + ',"take_profit":' + str.tostring(target1, format.mintick) + ',"take_profit_2":' + str.tostring(target2, format.mintick) + ',"secret":"' + webhookSecret + '","strategy":"pine_bridge"}'
+longMessage  = makeMessage("BUY", longSL, longTP1, longTP2)
+shortMessage = makeMessage("SELL", shortSL, shortTP1, shortTP2)
 noneMessage  = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe.period + '", "bar_time": ' + str.tostring(time) + ', "signal": "NONE", "price": ' + str.tostring(close) + ', "secret": "' + webhookSecret + '", "strategy": "pine_bridge"}'
 
 signalState = longSignal ? "BUY" : shortSignal ? "SELL" : "NONE"
@@ -124,9 +134,9 @@ var string lastAlertState = "NONE"
 // price and resolve TP/SL. The durable server registry suppresses repeat posts.
 // Emit NONE only on the transition out of a signal to re-arm a future setup.
 if enableAlerts and barstate.isconfirmed
-    if signalState == "BUY"
+    if signalState == "BUY" and not na(atrVal) and atrVal > 0 and tp2RR > tp1RR
         alert(longMessage, alert.freq_once_per_bar_close)
-    else if signalState == "SELL"
+    else if signalState == "SELL" and not na(atrVal) and atrVal > 0 and tp2RR > tp1RR
         alert(shortMessage, alert.freq_once_per_bar_close)
     else if lastAlertState != "NONE"
         alert(noneMessage, alert.freq_once_per_bar_close)
