@@ -229,7 +229,7 @@ def test_webhook_returns_multistatus_when_no_channel_reports_delivery(monkeypatc
     })
     assert response.status_code == 503
     assert response.json()["status"] == "delivery_failed"
-    assert "no notification channel reported delivery" in response.json()["detail"]
+    assert "required Telegram chart post" in response.json()["detail"]
 
 
 def test_webhook_reports_success_when_a_channel_reports_delivery(monkeypatch):
@@ -280,7 +280,10 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
     from src.signal_lifecycle import SignalLifecycleStore
 
     lifecycle = SignalLifecycleStore(tmp_path / "signal-state.sqlite3")
-    settings = Settings(_env_file=None, min_risk_reward=2.0)
+    settings = Settings(
+        _env_file=None, min_risk_reward=2.0,
+        telegram_bot_token="1:test", telegram_channel_id="-100testchannel",
+    )
     messages = []
     live = {"entry": 1.085}
     monkeypatch.setattr(
@@ -305,15 +308,16 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
         return charting.ChartAssets(image_path, source_path)
 
     monkeypatch.setattr(charting, "create_signal_chart", fake_chart)
+    def fake_dispatch_signal(message, _image, _settings=None):
+        messages.append(message)
+        notifier._delivery_state.last_photo_message_id = 777
+        notifier._delivery_state.last_photo_chat_id = "-100testchannel"
+        return {"telegram": True, "discord": False, "desktop": False}
+
+    monkeypatch.setattr(notifier, "dispatch_signal", fake_dispatch_signal)
     monkeypatch.setattr(
-        notifier,
-        "dispatch_message",
-        lambda message, _settings=None, **_kwargs: messages.append(message) or {"telegram": True},
-    )
-    monkeypatch.setattr(
-        notifier,
-        "dispatch_signal",
-        lambda message, _image, _settings=None: messages.append(message) or {"telegram": True},
+        notifier, "send_telegram",
+        lambda message, *_a, **_k: messages.append(message) or True,
     )
     client = TestClient(bridge.app)
     base = {
@@ -342,7 +346,7 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
     assert first.json()["status"] == "ok"
     assert repeated.json()["status"] == "duplicate_suppressed"
     assert closed.json()["status"] == "duplicate_suppressed"
-    assert still_blocked.json()["status"] == "duplicate_suppressed"
+    assert still_blocked.json()["status"] == "live_quote_unavailable"
     assert len(messages) == 2
     assert "توصية تداول احترافية جديدة" in messages[0]
     assert "نتيجة التوصية" in messages[1]
@@ -352,6 +356,7 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
         "/webhook/tradingview",
         json={**base, "signal": "NONE", "price": 1.093, "bar_time": _fresh_bar_time()},
     )
+    live["entry"] = 1.094
     next_setup = client.post(
         "/webhook/tradingview", json={**alert_payload(1.094), "bar_time": _fresh_bar_time()}
     )

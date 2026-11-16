@@ -341,9 +341,8 @@ class TestNotifierFormatting:
         assert "شراء (BUY)" in message
         assert "سعر الدخول:" in message
         assert "وقف الخسارة:" in message
-        assert message.count("الهدف الوحيد:") == 1
-        assert "الهدف الأول:" not in message
-        assert "الهدف الثاني:" not in message
+        assert "الهدف الأول TP1:" in message
+        assert "الهدف النهائي TP2:" in message
         assert "حجم العقد المقترح:" in message
         assert "الوقت:" in message
 

@@ -162,7 +162,10 @@ def fetch_ohlcv_oanda(request: OHLCVRequest, settings=None) -> pd.DataFrame:
         if not isinstance(mid, dict):
             continue
         try:
-            stamp = pd.to_datetime(candle["time"], utc=True, errors="raise")
+            stamp = pd.Timestamp(candle["time"])
+            if stamp.tzinfo is None:
+                raise ValueError("OANDA candle timestamp has no timezone")
+            stamp = stamp.tz_convert("UTC")
             row = {
                 "Open": float(mid["o"]), "High": float(mid["h"]),
                 "Low": float(mid["l"]), "Close": float(mid["c"]),
@@ -176,6 +179,7 @@ def fetch_ohlcv_oanda(request: OHLCVRequest, settings=None) -> pd.DataFrame:
         raise DataFetchError(f"OANDA returned no completed candles for {instrument}/{request.timeframe}")
     frame = pd.DataFrame(rows, index=pd.DatetimeIndex(stamps, name="Datetime"))
     frame = _validate(frame, request)
+    frame.attrs["provider"] = "oanda"
     _ensure_fresh(frame, request)
     return frame
 
@@ -218,9 +222,8 @@ def get_oanda_live_quote(symbol: str, settings=None, *, use_cache: bool = True) 
     except (ValueError, TypeError, KeyError, IndexError, StopIteration) as exc:
         raise DataFetchError("OANDA returned a malformed or incomplete quote") from exc
     if observed_at.tzinfo is None:
-        observed_at = observed_at.replace(tzinfo=timezone.utc)
-    else:
-        observed_at = observed_at.astimezone(timezone.utc)
+        raise DataFetchError("OANDA quote timestamp has no timezone")
+    observed_at = observed_at.astimezone(timezone.utc)
     if not all(math.isfinite(value) and value > 0 for value in (bid, ask)) or ask < bid:
         raise DataFetchError("OANDA returned invalid bid/ask values")
     quote = LiveQuote(instrument, bid, ask, observed_at, status)
@@ -265,8 +268,9 @@ def _validate(df: pd.DataFrame, request: OHLCVRequest) -> pd.DataFrame:
     if df.empty:
         raise DataFetchError(f"OHLCV has no complete price bars for {request.symbol}/{request.timeframe}")
     prices = df[["Open", "High", "Low", "Close"]].to_numpy(dtype=float)
-    if not bool(np.isfinite(prices).all()):
-        raise DataFetchError(f"OHLCV contains non-finite prices for {request.symbol}/{request.timeframe}")
+    volumes = df["Volume"].to_numpy(dtype=float)
+    if not bool(np.isfinite(prices).all()) or not bool(np.isfinite(volumes).all()):
+        raise DataFetchError(f"OHLCV contains non-finite price or volume data for {request.symbol}/{request.timeframe}")
     invalid_range = (
         (df["High"] < df[["Open", "Close", "Low"]].max(axis=1))
         | (df["Low"] > df[["Open", "Close", "High"]].min(axis=1))
@@ -336,6 +340,7 @@ def fetch_ohlcv_yfinance(
                 df.columns = df.columns.get_level_values(0)
             df = _resample(df, request.timeframe)
             df = _validate(df, request)
+            df.attrs["provider"] = "yfinance"
             return df
         except DataFetchError:
             raise

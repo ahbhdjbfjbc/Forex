@@ -23,8 +23,7 @@ from src.symbol_resolver import instrument_type
 
 logger = logging.getLogger(__name__)
 
-# The channel message ID of the most recent successful sendPhoto on this
-# thread, so send_alert can persist it and reply to it with the outcome.
+# Telegram delivery receipt for the most recent signal photo on this thread.
 _delivery_state = threading.local()
 
 
@@ -90,8 +89,10 @@ def format_message(signal: TradeSignal, market_frame=None) -> str:
     if instrument_type(signal.symbol) == "FX":
         sl_text = f"🛑 وقف الخسارة: {fp(signal.stop_loss_price)} (-{signal.stop_loss_pips:g} نقطة)"
         target_text = (
-            f"🎯 الهدف الوحيد: {fp(signal.take_profit_2_price)} "
-            f"(+{signal.take_profit_2_pips:g} نقطة | العائد 1:{signal.take_profit_2_rr:g})"
+            f"🎯 الهدف الأول TP1: {fp(signal.take_profit_1_price)} "
+            f"(+{signal.take_profit_1_pips:g} نقطة | 1:{signal.take_profit_1_rr:g})\n"
+            f"🎯 الهدف النهائي TP2: {fp(signal.take_profit_2_price)} "
+            f"(+{signal.take_profit_2_pips:g} نقطة | 1:{signal.take_profit_2_rr:g})"
         )
         size_text = f"💼 حجم العقد المقترح: {signal.risk.lot_size:g} لوت قياسي"
     else:
@@ -106,8 +107,10 @@ def format_message(signal: TradeSignal, market_frame=None) -> str:
         )
         sl_text = f"🛑 وقف الخسارة: {fp(signal.stop_loss_price)} (مسافة سعرية {signal.stop_loss_pips:g})"
         target_text = (
-            f"🎯 الهدف الوحيد: {fp(signal.take_profit_2_price)} "
-            f"(مسافة سعرية {signal.take_profit_2_pips:g} | العائد 1:{signal.take_profit_2_rr:g})"
+            f"🎯 الهدف الأول TP1: {fp(signal.take_profit_1_price)} "
+            f"(مسافة سعرية {signal.take_profit_1_pips:g} | 1:{signal.take_profit_1_rr:g})\n"
+            f"🎯 الهدف النهائي TP2: {fp(signal.take_profit_2_price)} "
+            f"(مسافة سعرية {signal.take_profit_2_pips:g} | 1:{signal.take_profit_2_rr:g})"
         )
         size_text = f"💼 الحجم التقريبي: {signal.risk.lot_size:g} {unit} (قد يختلف حجم العقد حسب الوسيط)"
 
@@ -120,7 +123,8 @@ def format_message(signal: TradeSignal, market_frame=None) -> str:
         for zone in context.zones:
             name = "فجوة FVG" if zone.kind == "FVG" else "Order Block"
             context_lines.append(f"🟪 منطقة {name} داعمة: {fp(zone.low)} – {fp(zone.high)}")
-    if signal.symbol.upper() == "XAUUSD":
+    if (signal.symbol.upper() == "XAUUSD" and market_frame is not None
+            and str(market_frame.attrs.get("provider", "")).lower() == "yfinance"):
         context_lines.append("⚠️ مصدر الذهب: GC=F (عقود COMEX الآجلة)، وليس سعراً فورياً XAUUSD")
 
     lines = [
@@ -189,14 +193,20 @@ def send_telegram(
             logger.warning("telegram rate-limited (HTTP %s)", resp.status_code)
             return False
         resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            logger.warning("Telegram API did not acknowledge message delivery")
+            return False
         return True
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         logger.error("telegram send failed (%s)", type(exc).__name__)
         return False
 
 
 def send_telegram_photo(caption: str, image_path: str | Path, settings: Settings) -> bool:
     """Send the recommendation and its chart in one Telegram sendPhoto call."""
+    _delivery_state.last_photo_message_id = None
+    _delivery_state.last_photo_chat_id = None
     # Signals only go to the explicitly configured broadcast channel. Never
     # fall back to the admin's private or command-control chat.
     target_chat_id = str(getattr(settings, "telegram_channel_id", "") or "").strip()
@@ -226,7 +236,11 @@ def send_telegram_photo(caption: str, image_path: str | Path, settings: Settings
             return False
         result = payload.get("result")
         message_id = result.get("message_id") if isinstance(result, dict) else None
-        _delivery_state.last_photo_message_id = message_id if isinstance(message_id, int) else None
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            logger.warning("Telegram photo response did not contain a message ID")
+            return False
+        _delivery_state.last_photo_message_id = message_id
+        _delivery_state.last_photo_chat_id = target_chat_id
         return True
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.error("telegram photo send failed (%s)", type(exc).__name__)
@@ -342,6 +356,11 @@ def dispatch_signal(message: str, image_path: str | Path, settings: Settings | N
     except Exception as exc:
         logger.error("telegram photo notification failed (%s)", type(exc).__name__)
         results["telegram"] = False
+    # A recommendation without its Telegram chart cannot be linked to the
+    # required result reply. Do not publish an untracked copy elsewhere.
+    if not results["telegram"]:
+        results.update(discord=False, desktop=False)
+        return results
     for name, dispatcher in (("discord", send_discord), ("desktop", send_desktop)):
         try:
             results[name] = bool(dispatcher(message, settings))
@@ -396,30 +415,19 @@ def send_signal_outcome(
     When the channel message ID of the original recommendation is known, the
     result is posted as a reply to it so every trade and its outcome stay
     linked in the same channel."""
+    settings = settings or get_settings()
     try:
-        original_message_id = signal_lifecycle.telegram_message_id(outcome.signal_id)
+        original_message_id, original_chat_id = signal_lifecycle.telegram_delivery(outcome.signal_id)
     except Exception:
-        original_message_id = None
-    if original_message_id:
-        results = dispatch_message(
-            format_signal_outcome(outcome),
-            settings,
-            reply_to_message_id=original_message_id,
-            target_chat_id=str(
-                getattr(settings or get_settings(), "telegram_channel_id", "") or ""
-            ).strip(),
-        )
-    else:
-        results = dispatch_message(
-            format_signal_outcome(outcome),
-            settings,
-            target_chat_id=str(
-                getattr(settings or get_settings(), "telegram_channel_id", "") or ""
-            ).strip(),
-        )
-    # If the original signal was posted to Telegram, a Discord/desktop success
-    # is not enough: keep the outcome pending until Telegram accepts the reply.
-    delivered = bool(results.get("telegram")) if original_message_id else any(results.values())
+        original_message_id, original_chat_id = None, None
+    target_chat_id = original_chat_id or str(getattr(settings, "telegram_channel_id", "") or "").strip()
+    delivered = send_telegram(
+        format_signal_outcome(outcome),
+        settings,
+        reply_to_message_id=original_message_id,
+        target_chat_id=target_chat_id,
+    )
+    results = {"telegram": bool(delivered), "discord": False, "desktop": False}
     if delivered:
         signal_lifecycle.mark_outcome_sent(outcome.signal_id)
     return results
@@ -485,7 +493,7 @@ def send_alert(
         send_signal_outcome(tick_outcome, settings)
 
     registration = signal_lifecycle.register_signal(
-        signal, source=source, entry_bar_id=entry_bar_id
+        signal, source=source, entry_bar_id=entry_bar_id, require_delivery=True
     )
     if registration.closed_outcome is not None:
         send_signal_outcome(registration.closed_outcome, settings)
@@ -511,18 +519,23 @@ def send_alert(
 
     message = format_message(signal, market_frame)
     _delivery_state.last_photo_message_id = None
+    _delivery_state.last_photo_chat_id = None
     results = dispatch_signal(message, chart_assets.image_path, settings)
     message_id = getattr(_delivery_state, "last_photo_message_id", None)
-    if message_id and results.get("telegram"):
+    chat_id = getattr(_delivery_state, "last_photo_chat_id", None)
+    if message_id and chat_id and results.get("telegram"):
         try:
-            signal_lifecycle.set_telegram_message_id(registration.signal_id, message_id)
+            if not signal_lifecycle.set_telegram_delivery(registration.signal_id, message_id, chat_id):
+                raise RuntimeError("Telegram delivery receipt could not be persisted")
         except Exception as exc:
             logger.warning("could not store channel message id (%s)", type(exc).__name__)
-    if not any(results.values()):
+            results["telegram"] = False
+    else:
+        results["telegram"] = False
+    if not results.get("telegram"):
         signal_lifecycle.cancel_signal(registration.signal_id)
-    if not any(results.values()):
         logger.warning(
-            "no notification channel is configured/succeeded for %s %s signal",
+            "no linked Telegram chart delivery succeeded for %s %s signal",
             signal.symbol, signal.direction.value,
         )
     return DeliveryResult(results, final_signal=signal)

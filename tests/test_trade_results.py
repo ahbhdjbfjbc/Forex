@@ -89,7 +89,8 @@ def test_full_signal_chart_levels_and_final_outcome_use_the_configured_group(mon
     caption = posts[0][1]["data"]["caption"]
     assert "سعر الدخول:" in caption and "2310" in caption
     assert "وقف الخسارة:" in caption and "2305" in caption
-    assert "الهدف الوحيد:" in caption and "2325" in caption
+    assert "الهدف الأول TP1:" in caption and "2320" in caption
+    assert "الهدف النهائي TP2:" in caption and "2325" in caption
 
     outcome = store.observe_bar("XAUUSD", "1h", high=2326.0, low=2315.0, close=2325.0, bar_id="b1")
     assert outcome is not None and outcome.outcome == "TAKE_PROFIT_2"
@@ -135,16 +136,12 @@ def test_outcome_stays_pending_if_channel_reply_fails(monkeypatch, tmp_path):
     assert outcome is not None
     marked = []
     monkeypatch.setattr(store, "mark_outcome_sent", lambda signal_id: marked.append(signal_id))
-    monkeypatch.setattr(
-        notifier,
-        "dispatch_message",
-        lambda *_args, **_kwargs: {"telegram": False, "discord": True, "desktop": False},
-    )
+    monkeypatch.setattr(notifier, "send_telegram", lambda *_args, **_kwargs: False)
 
     result = notifier.send_signal_outcome(outcome, settings)
 
     assert result["telegram"] is False
-    assert result["discord"] is True
+    assert result["discord"] is False
     assert marked == []
 
 

@@ -62,7 +62,8 @@ def create_signal_chart(signal: TradeSignal, frame: pd.DataFrame, signal_id: str
     def price_label(value: float) -> str:
         return format_price(value, signal.symbol)
     ema20 = visible["Close"].ewm(span=20, adjust=False).mean()
-    target = float(signal.take_profit_2_price)
+    target1 = float(signal.take_profit_1_price)
+    target2 = float(signal.take_profit_2_price)
 
     plt.style.use("dark_background")
     fig, ax = plt.subplots(figsize=(10, 7.5), dpi=160)
@@ -108,7 +109,8 @@ def create_signal_chart(signal: TradeSignal, frame: pd.DataFrame, signal_id: str
     levels = [
         (float(signal.entry_price), "ENTRY", "#f5ce5b", "-"),
         (float(signal.stop_loss_price), "STOP", "#ff5a66", "--"),
-        (target, "TARGET", "#42d392", "--"),
+        (target1, "TP1", "#67d9a4", ":"),
+        (target2, "TP2", "#42d392", "--"),
         (support, "SUPPORT", "#b28cff", ":"),
         (resistance, "RESISTANCE", "#ff9d66", ":"),
     ]
@@ -142,15 +144,19 @@ def create_signal_chart(signal: TradeSignal, frame: pd.DataFrame, signal_id: str
     ax.grid(color="#718096", linewidth=0.4, alpha=0.18)
     ax.set_ylabel("Price")
     direction = "BUY" if signal.direction == TradeDirection.BUY else "SELL"
-    source_label = "Yahoo Finance OHLCV"
-    if signal.symbol.upper() == "XAUUSD":
-        source_label += " · GC=F COMEX gold-futures proxy (not spot)"
+    provider = str(frame.attrs.get("provider", "")).strip().lower()
+    source_label = {
+        "oanda": "OANDA v20 midpoint OHLCV",
+        "yfinance": "Yahoo Finance OHLCV (historical/delayed; not live)",
+    }.get(provider, "Unverified OHLCV source (metadata unavailable)")
+    if signal.symbol.upper() == "XAUUSD" and provider == "yfinance":
+        source_label += " · GC=F COMEX futures proxy (not spot)"
     direction_color = "#21c78a" if direction == "BUY" else "#f05d6c"
     fig.text(0.10, 0.965, "TONPO Signals", color="#f5ce5b", fontsize=17, fontweight="bold", va="top")
     fig.text(0.78, 0.965, f"{signal.symbol}  ·  {signal.timeframe.upper()}  ·  {direction}",
              color=direction_color, fontsize=17, fontweight="bold", va="top", ha="right")
     fig.text(0.10, 0.915,
-             f"Entry {price_label(signal.entry_price)}  ·  SL {price_label(signal.stop_loss_price)}  ·  Target {price_label(target)}",
+             f"Entry {price_label(signal.entry_price)}  ·  SL {price_label(signal.stop_loss_price)}  ·  TP1 {price_label(target1)}  ·  TP2 {price_label(target2)}",
              color="#c8d2e2", fontsize=12, va="top")
     created = pd.Timestamp(signal.timestamp)
     if created.tzinfo is not None:
@@ -184,7 +190,9 @@ def create_signal_chart(signal: TradeSignal, frame: pd.DataFrame, signal_id: str
         "levels": {
             "entry": float(signal.entry_price),
             "stop_loss": float(signal.stop_loss_price),
-            "single_chart_target": target,
+            "take_profit_1": target1,
+            "take_profit_2": target2,
+            "final_target": target2,
             "support": support,
             "resistance": resistance,
             "entry_zone": [float(context.entry_low), float(context.entry_high)],

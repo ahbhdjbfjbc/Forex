@@ -41,7 +41,7 @@ def execute_paper_trade(signal: TradeSignal, settings: Settings | None = None) -
     try:
         result = oanda_client.place_market_order(
             signal.symbol, signal.direction, units,
-            signal.stop_loss_price, signal.take_profit_1_price, settings,
+            signal.stop_loss_price, signal.take_profit_2_price, settings,
         )
     except Exception:
         logger.exception("paper trade execution failed for %s", signal.symbol)

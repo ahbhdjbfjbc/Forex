@@ -130,10 +130,11 @@ noneMessage  = '{"ticker": "' + syminfo.ticker + '", "timeframe": "' + timeframe
 
 signalState = longSignal ? "BUY" : shortSignal ? "SELL" : "NONE"
 var string lastAlertState = "NONE"
+supportedWebhookTimeframe = timeframe.period == "15" or timeframe.period == "30" or timeframe.period == "60" or timeframe.period == "240" or timeframe.period == "D" or timeframe.period == "1D"
 // BUY/SELL updates continue while a setup is active so Python can monitor its
 // price and resolve TP/SL. The durable server registry suppresses repeat posts.
 // Emit NONE only on the transition out of a signal to re-arm a future setup.
-if enableAlerts and barstate.isconfirmed
+if enableAlerts and supportedWebhookTimeframe and barstate.isconfirmed
     if signalState == "BUY" and not na(atrVal) and atrVal > 0 and tp2RR > tp1RR
         alert(longMessage, alert.freq_once_per_bar_close)
     else if signalState == "SELL" and not na(atrVal) and atrVal > 0 and tp2RR > tp1RR
@@ -142,19 +143,16 @@ if enableAlerts and barstate.isconfirmed
         alert(noneMessage, alert.freq_once_per_bar_close)
 lastAlertState := signalState
 
-alertcondition(longSignal, title = "Forex Scanner Long", message = "BUY {{ticker}} {{interval}} @ {{close}}")
-alertcondition(shortSignal, title = "Forex Scanner Short", message = "SELL {{ticker}} {{interval}} @ {{close}}")
-
 // ---------------------------------------------------------------------------
 // Setup notes for TradingView:
 // 1. Add this indicator to your chart.
-// 2. Create an Alert -> Condition: "Forex Scanner Bridge" -> the long/short
-//    alertcondition, OR use "Any alert() function call" if using the
-//    alert() calls above (recommended — carries the full JSON payload).
-// 3. Public Webhook URL should be https://<your-domain>/webhook/tradingview
+// 2. Use a supported timeframe (15m, 30m, 1h, 4h, or 1D); other timeframes
+//    intentionally do not emit webhooks accepted by the server.
+// 3. Create an Alert -> Condition: "Forex Scanner Bridge" -> "Any alert() function call".
+// 4. Public Webhook URL should be https://<your-domain>/webhook/tradingview
 //    behind an HTTPS reverse proxy; do not expose plain-HTTP Uvicorn directly.
-// 4. Set "Message" to {{strategy.order.alert_message}} when using alert(),
-//    or paste the JSON manually when using alertcondition().
-// 5. Replace `webhookSecret` input with the same value as WEBHOOK_SHARED_SECRET
+// 5. Do not use alertcondition: it cannot serialize this script's full JSON
+//    payload or its stop/target levels.
+// 6. Replace `webhookSecret` input with the same value as WEBHOOK_SHARED_SECRET
 //    in your .env.
 // ---------------------------------------------------------------------------

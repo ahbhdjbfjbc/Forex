@@ -67,21 +67,25 @@ _recent_auto_signal_keys: OrderedDict[tuple[str, ...], None] = OrderedDict()
 _MAX_RECENT_AUTO_SIGNALS = 4096
 
 
-def _claim_auto_signal(signal, frame) -> tuple[str, ...] | None:
-    """Claim one signal per market candle so periodic scans do not resend it."""
+def _auto_signal_key(signal, frame) -> tuple[str, ...]:
     try:
         bar_identity = str(frame.index[-1])
     except (AttributeError, IndexError, TypeError):
         timestamp = getattr(signal, "timestamp", None)
         bar_identity = timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
 
-    key = (
+    return (
         str(getattr(signal, "symbol", "")).upper(),
         str(getattr(signal, "timeframe", "")).lower(),
         str(getattr(getattr(signal, "direction", ""), "value", getattr(signal, "direction", ""))),
         str(getattr(getattr(signal, "strategy", ""), "value", getattr(signal, "strategy", ""))),
         bar_identity,
     )
+
+
+def _claim_auto_signal(signal, frame) -> tuple[str, ...] | None:
+    """Claim one signal per market candle so periodic scans do not resend it."""
+    key = _auto_signal_key(signal, frame)
     with _auto_signal_lock:
         if key in _recent_auto_signal_keys:
             return None
@@ -89,6 +93,12 @@ def _claim_auto_signal(signal, frame) -> tuple[str, ...] | None:
         while len(_recent_auto_signal_keys) > _MAX_RECENT_AUTO_SIGNALS:
             _recent_auto_signal_keys.popitem(last=False)
     return key
+
+
+def _release_auto_signal(key: tuple[str, ...]) -> None:
+    """Allow a transiently blocked/failed publication to retry on this candle."""
+    with _auto_signal_lock:
+        _recent_auto_signal_keys.pop(key, None)
 
 
 _NEWS_STATE_FILE = "news_pause_state.json"
@@ -264,24 +274,36 @@ def run_scan_cycle(settings: Settings | None = None) -> None:
                 regime_result.confidence, settings.min_signal_confidence,
             )
             continue
-        if _claim_auto_signal(signal, df) is None:
+        claimed_key = _claim_auto_signal(signal, df)
+        if claimed_key is None:
             logger.info(
                 "suppressing duplicate auto-scan signal for %s/%s on the same market candle",
                 signal.symbol, signal.timeframe,
             )
             continue
-        delivery = send_alert(
-            signal, settings, source="auto-scan", entry_bar_id=bar_id, market_frame=df
-        )
+        try:
+            delivery = send_alert(
+                signal, settings, source="auto-scan", entry_bar_id=bar_id, market_frame=df
+            )
+        except Exception:
+            _release_auto_signal(claimed_key)
+            logger.exception("auto-scan notification failed; the same candle can retry later")
+            continue
+        if not isinstance(delivery, dict):
+            _release_auto_signal(claimed_key)
+            logger.error("auto-scan notifier returned an invalid delivery result")
+            continue
         if delivery.get("duplicate"):
             continue
-        if any(value for channel, value in delivery.items() if channel != "duplicate"):
+        if delivery.get("telegram") is True:
             signals_sent += 1
             final_signal = getattr(delivery, "final_signal", None)
             if settings.enable_paper_trading and final_signal is None:
                 logger.error("skipping paper order: notifier did not return the published signal")
             elif final_signal is not None:
                 execute_paper_trade(final_signal, settings)
+        else:
+            _release_auto_signal(claimed_key)
 
     logger.info(
         "auto-scan cycle complete: %d/%d (symbol,timeframe) pairs returned data, "

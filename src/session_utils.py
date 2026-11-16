@@ -48,12 +48,14 @@ def compute_rvol(volume: pd.Series, lookback: int = 20) -> float:
     is zero or NaN, we can't measure liquidity from volume at all — return
     1.0 (neutral) rather than dividing by zero or fabricating a signal.
     """
-    clean = volume.dropna()
-    if len(clean) < max(5, lookback // 4) + 1:
+    values = pd.to_numeric(volume, errors="coerce").to_numpy(dtype=float)
+    if len(values) < max(5, lookback // 4) + 1:
         return 1.0
-    latest = clean.iloc[-1]
-    baseline_window = clean.iloc[-(lookback + 1) : -1]
-    avg = baseline_window.mean()
-    if not np.isfinite(avg) or avg <= 0:
+    latest = values[-1]
+    baseline_window = values[-(lookback + 1) : -1]
+    if not np.isfinite(latest) or not np.isfinite(baseline_window).all():
+        return 1.0
+    avg = float(baseline_window.mean())
+    if avg <= 0:
         return 1.0
     return float(latest / avg)

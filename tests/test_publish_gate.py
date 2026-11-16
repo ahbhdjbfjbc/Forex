@@ -26,7 +26,8 @@ def test_market_hours(monkeypatch):
     monkeypatch.setattr(publish_gate, "_check_live_data_source", lambda *_a: publish_gate.GateDecision(True))
     assert publish_gate.fx_market_open(WEDNESDAY_NOON)
     assert not publish_gate.fx_market_open(datetime(2026, 11, 7, 12, tzinfo=timezone.utc))   # Saturday
-    assert not publish_gate.fx_market_open(datetime(2026, 11, 6, 21, 30, tzinfo=timezone.utc))  # Fri late
+    assert publish_gate.fx_market_open(datetime(2026, 11, 6, 21, 30, tzinfo=timezone.utc))  # Fri 16:30 EST
+    assert not publish_gate.fx_market_open(datetime(2026, 11, 6, 22, 0, tzinfo=timezone.utc))  # Fri 17:00 EST
     assert not publish_gate.fx_market_open(datetime(2026, 11, 8, 20, tzinfo=timezone.utc))   # Sun early
     assert publish_gate.fx_market_open(datetime(2026, 11, 8, 22, 30, tzinfo=timezone.utc))
     weekend = datetime(2026, 11, 7, 12, tzinfo=timezone.utc)

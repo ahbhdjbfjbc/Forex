@@ -43,6 +43,7 @@ def _signal():
 def test_chart_assets_are_built_from_saved_source_frame_and_match_signal(tmp_path, monkeypatch):
     monkeypatch.setattr(charting, "get_data_dir", lambda: tmp_path)
     frame = _frame()
+    frame.attrs["provider"] = "oanda"
     signal = _signal()
     assets = charting.create_signal_chart(signal, frame, "signal-123")
 
@@ -50,11 +51,11 @@ def test_chart_assets_are_built_from_saved_source_frame_and_match_signal(tmp_pat
     assert assets.image_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     source = json.loads(assets.source_path.read_text(encoding="utf-8"))
     assert source["signal_id"] == "signal-123"
-    assert source["source"].startswith("Yahoo Finance OHLCV")
-    assert "not spot" in source["source"]
+    assert source["source"] == "OANDA v20 midpoint OHLCV"
     assert source["levels"]["entry"] == signal.entry_price
     assert source["levels"]["stop_loss"] == signal.stop_loss_price
-    assert source["levels"]["single_chart_target"] == signal.take_profit_2_price
+    assert source["levels"]["take_profit_1"] == signal.take_profit_1_price
+    assert source["levels"]["take_profit_2"] == signal.take_profit_2_price
     assert len(source["ohlcv"]) == len(frame)
     assert source["ohlcv"][-1]["Close"] == frame["Close"].iloc[-1]
 
@@ -84,7 +85,7 @@ def test_telegram_photo_uses_single_sendphoto_and_checks_api_ack(tmp_path, monke
 
         @staticmethod
         def json():
-            return {"ok": True}
+            return {"ok": True, "result": {"message_id": 22}}
 
     def fake_post(url, **kwargs):
         sent["url"] = url
@@ -104,7 +105,6 @@ def test_telegram_photo_uses_single_sendphoto_and_checks_api_ack(tmp_path, monke
 
 def test_text_formatter_has_one_target_and_gold_source_disclosure():
     message = notifier.format_message(_signal(), _frame())
-    assert message.count("الهدف الوحيد") == 1
-    assert "الهدف الأول" not in message and "الهدف الثاني" not in message
-    assert "GC=F" in message and "ليس سعراً فورياً" in message
+    assert "الهدف الأول TP1" in message and "الهدف النهائي TP2" in message
+    assert "GC=F" not in message
     assert "دعم/مقاومة" in message

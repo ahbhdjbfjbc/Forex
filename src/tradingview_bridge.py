@@ -216,7 +216,7 @@ def _validate_alert_time(alert: TradingViewAlert, now: datetime | None = None) -
         else:
             event_time = datetime.fromisoformat(raw.replace("Z", "+00:00"))
             if event_time.tzinfo is None:
-                event_time = event_time.replace(tzinfo=timezone.utc)
+                raise ValueError("bar_time has no timezone")
             event_time = event_time.astimezone(timezone.utc)
     except (ValueError, OverflowError, OSError) as exc:
         raise HTTPException(status_code=422, detail="bar_time is invalid") from exc
@@ -275,6 +275,8 @@ def _corroborate_alert(alert: TradingViewAlert):
 
     market_price = quote.mid
     atr = float(regime_result.metrics.atr)
+    if not math.isfinite(atr) or atr <= 0:
+        raise MarketDataUnavailable(f"invalid ATR for {symbol}/{alert.timeframe}")
     tolerance = max(quote.spread * 3.0, abs(market_price) * 0.0001, atr * 0.20)
     if not math.isfinite(market_price) or abs(alert.price - market_price) > tolerance:
         raise AlertNotCorroborated("TradingView price does not match the fresh OANDA bid/ask market")
@@ -298,6 +300,11 @@ def _apply_tradingview_levels(signal: TradeSignal, alert: TradingViewAlert, sett
         int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
     )
     entry = quote.ask if signal.direction == TradeDirection.BUY else quote.bid
+    planned_risk = abs(float(alert.price) - float(alert.stop_loss))
+    if not math.isfinite(planned_risk) or planned_risk <= 0:
+        raise ValueError("TradingView alert has no valid initial risk distance")
+    if abs(entry - float(alert.price)) > planned_risk * 0.25:
+        raise ValueError("OANDA quote moved more than 0.25R from the original TradingView entry")
     shift = entry - alert.price
     adjusted_alert = alert.model_copy(update={
         "price": entry,
@@ -684,18 +691,16 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
             detail=f"{alert.ticker}/{alert.timeframe} already has an active or recently closed setup",
         )
 
-    if not isinstance(dispatch_results, dict) or not any(
-        value is True for channel, value in dispatch_results.items() if channel != "duplicate"
-    ):
-        # Permit a caller/TradingView retry after a transient no-channel failure.
+    if not isinstance(dispatch_results, dict) or dispatch_results.get("telegram") is not True:
+        # The required Telegram chart post is the anchor for its eventual result reply.
         _release_alert_fingerprint(fingerprint)
-        logger.warning("alert validated for %s but no notification channel reported delivery", alert.ticker)
+        logger.warning("alert validated for %s but Telegram did not acknowledge the linked chart post", alert.ticker)
         return JSONResponse(
             status_code=503,
             content=WebhookAck(
                 status="delivery_failed",
-                detail="alert validated and stored, but no notification channel reported delivery",
+                detail="alert validated, but the required Telegram chart post was not acknowledged",
             ).model_dump(),
         )
 
-    return WebhookAck(status="ok", detail=f"alert processed for {alert.ticker}; at least one channel reported delivery")
+    return WebhookAck(status="ok", detail=f"alert processed for {alert.ticker}; linked Telegram chart post delivered")

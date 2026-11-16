@@ -75,8 +75,8 @@ def test_webhook_enforces_per_peer_rate_limit(monkeypatch):
         }
 
     responses = [client.post("/webhook/tradingview", json=alert_payload(p))
-                 for p in (1.085, 1.086)]
-    blocked = client.post("/webhook/tradingview", json=alert_payload(1.087))
+                 for p in (1.085, 1.0852)]
+    blocked = client.post("/webhook/tradingview", json=alert_payload(1.0853))
     assert [r.status_code for r in responses] == [200, 200]
     assert blocked.status_code == 429
     assert int(blocked.headers["Retry-After"]) >= 1

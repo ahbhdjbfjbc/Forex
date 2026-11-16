@@ -56,7 +56,7 @@ def test_start_answers_while_slow_scan_is_running(monkeypatch, tmp_path):
             "🎯 التوصية: دخول صفقة BUY\n"
             "📍 سعر الدخول: 1.08500\n"
             "🛑 وقف الخسارة: 1.08000\n"
-            "🎯 الهدف الوحيد: 1.09500",
+            "🎯 الهدف النهائي TP2: 1.09500",
             "اكتمل التحليل",
         ),
         (RuntimeError("market data unavailable"), "تعذر إكمال الفحص"),

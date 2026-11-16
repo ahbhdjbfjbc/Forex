@@ -12,10 +12,17 @@ from pathlib import Path
 import sqlite3
 import threading
 from uuid import uuid4
+import logging
 
 from src.storage import get_data_dir
 from src.risk import pip_size
 from src.symbol_resolver import instrument_type
+
+logger = logging.getLogger(__name__)
+
+
+class OutcomeHistoryGap(ValueError):
+    """Raised when the provider no longer returns every bar since last check."""
 
 
 @dataclass(frozen=True)
@@ -156,7 +163,9 @@ class SignalLifecycleStore:
                     quality_score INTEGER,
                     quality_grade TEXT,
                     telegram_message_id INTEGER,
-                    strategy_version TEXT
+                    strategy_version TEXT,
+                    published INTEGER NOT NULL DEFAULT 1,
+                    telegram_chat_id TEXT
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS one_active_signal_per_market
                     ON signals(market_key) WHERE status = 'ACTIVE';
@@ -194,6 +203,10 @@ class SignalLifecycleStore:
                 connection.execute("ALTER TABLE signals ADD COLUMN telegram_message_id INTEGER")
             if "strategy_version" not in columns:
                 connection.execute("ALTER TABLE signals ADD COLUMN strategy_version TEXT")
+            if "published" not in columns:
+                connection.execute("ALTER TABLE signals ADD COLUMN published INTEGER NOT NULL DEFAULT 1")
+            if "telegram_chat_id" not in columns:
+                connection.execute("ALTER TABLE signals ADD COLUMN telegram_chat_id TEXT")
 
     def set_chart_assets(self, signal_id: str, image_path: str, source_data_path: str) -> bool:
         """Persist local chart/source references before any recommendation is sent."""
@@ -215,6 +228,19 @@ class SignalLifecycleStore:
                 (int(message_id), signal_id),
             )
 
+    def set_telegram_delivery(self, signal_id: str, message_id: int, chat_id: str) -> bool:
+        """Atomically persist the Telegram post destination and expose for monitoring."""
+        if (not signal_id or not isinstance(message_id, int) or isinstance(message_id, bool)
+                or not str(chat_id).strip()):
+            return False
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE signals SET telegram_message_id=?, telegram_chat_id=?, published=1
+                   WHERE signal_id=? AND status='ACTIVE'""",
+                (int(message_id), str(chat_id).strip(), signal_id),
+            )
+            return cursor.rowcount == 1
+
     def telegram_message_id(self, signal_id: str) -> int | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -223,6 +249,18 @@ class SignalLifecycleStore:
         if row is None or row["telegram_message_id"] is None:
             return None
         return int(row["telegram_message_id"])
+
+    def telegram_delivery(self, signal_id: str) -> tuple[int | None, str | None]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT telegram_message_id, telegram_chat_id FROM signals WHERE signal_id=?",
+                (signal_id,),
+            ).fetchone()
+        if row is None:
+            return None, None
+        message_id = int(row["telegram_message_id"]) if row["telegram_message_id"] is not None else None
+        chat_id = str(row["telegram_chat_id"]) if row["telegram_chat_id"] else None
+        return message_id, chat_id
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30.0)
@@ -304,7 +342,8 @@ class SignalLifecycleStore:
         return self._outcome_from_row(closed)
 
     def register_signal(
-        self, signal, *, source: str = "unknown", entry_bar_id: str | None = None
+        self, signal, *, source: str = "unknown", entry_bar_id: str | None = None,
+        require_delivery: bool = False,
     ) -> SignalRegistration:
         symbol = str(signal.symbol).upper().strip()
         timeframe = normalize_timeframe(signal.timeframe)
@@ -346,8 +385,8 @@ class SignalLifecycleStore:
                         signal_id, market_key, symbol, timeframe, direction, strategy,
                         entry_price, stop_loss, take_profit_1, take_profit_2,
                         entry_bar_id, last_evaluated_bar, source, status, opened_at,
-                        quality_score, quality_grade, strategy_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?)""",
+                        quality_score, quality_grade, strategy_version, published
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?)""",
                     (
                         signal_id, key, symbol, timeframe, direction, strategy,
                         float(signal.entry_price), float(signal.stop_loss_price),
@@ -355,7 +394,7 @@ class SignalLifecycleStore:
                         entry_bar_id, entry_bar_id, source,
                         getattr(signal, "timestamp", datetime.now(timezone.utc)).isoformat(),
                         getattr(signal, "quality_score", None), getattr(signal, "quality_grade", None),
-                        _current_strategy_version(),
+                        _current_strategy_version(), 0 if require_delivery else 1,
                     ),
                 )
             except sqlite3.IntegrityError:
@@ -385,7 +424,7 @@ class SignalLifecycleStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT * FROM signals WHERE market_key=? AND status='ACTIVE'", (key,)
+                "SELECT * FROM signals WHERE market_key=? AND status='ACTIVE' AND published=1", (key,)
             ).fetchone()
             if row is None or (bar_id is not None and row["entry_bar_id"] == str(bar_id)):
                 connection.commit()
@@ -445,7 +484,7 @@ class SignalLifecycleStore:
         with self._connect() as connection:
             active = connection.execute(
                 "SELECT entry_bar_id, last_evaluated_bar FROM signals "
-                "WHERE market_key=? AND status='ACTIVE'", (key,)
+                "WHERE market_key=? AND status='ACTIVE' AND published=1", (key,)
             ).fetchone()
         if active is None or active["entry_bar_id"] is None or frame is None or frame.empty:
             return None
@@ -455,7 +494,18 @@ class SignalLifecycleStore:
         try:
             cursor_index = bar_ids.index(cursor)
         except ValueError:
-            start_index = max(0, len(bar_ids) - 1)
+            try:
+                entry_index = bar_ids.index(active["entry_bar_id"])
+            except ValueError as exc:
+                raise OutcomeHistoryGap(
+                    f"cannot safely resolve {symbol}/{timeframe}: last evaluated and entry bars "
+                    "are outside the fetched history"
+                ) from exc
+            logger.warning(
+                "backfilling outcome history from the entry bar for %s/%s because the last cursor is absent",
+                symbol, timeframe,
+            )
+            start_index = entry_index + 1
         else:
             start_index = cursor_index if cursor_index == len(bar_ids) - 1 else cursor_index + 1
 
@@ -485,7 +535,7 @@ class SignalLifecycleStore:
     def active_symbols(self) -> list[str]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT DISTINCT symbol FROM signals WHERE status='ACTIVE' ORDER BY symbol"
+                "SELECT DISTINCT symbol FROM signals WHERE status='ACTIVE' AND published=1 ORDER BY symbol"
             ).fetchall()
         return [str(row["symbol"]) for row in rows]
 
@@ -519,7 +569,7 @@ class SignalLifecycleStore:
         "signal_id, symbol, timeframe, direction, strategy, source, status, entry_price, "
         "stop_loss, take_profit_1, take_profit_2, exit_price, outcome, opened_at, closed_at, "
         "entry_bar_id, close_bar_id, tp1_reached, quality_score, quality_grade, chart_path, "
-        "source_data_path, result_sent, strategy_version, telegram_message_id"
+        "source_data_path, result_sent, strategy_version, telegram_message_id, telegram_chat_id, published"
     )
 
     def _enrich(self, row: sqlite3.Row) -> dict:
@@ -612,7 +662,8 @@ class SignalLifecycleStore:
     def active_markets(self) -> list[tuple[str, str]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT DISTINCT symbol, timeframe FROM signals WHERE status='ACTIVE' ORDER BY symbol"
+                "SELECT DISTINCT symbol, timeframe FROM signals "
+                "WHERE status='ACTIVE' AND published=1 ORDER BY symbol"
             ).fetchall()
         return [(str(row["symbol"]), str(row["timeframe"])) for row in rows]
 

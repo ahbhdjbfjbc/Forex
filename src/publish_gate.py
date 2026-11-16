@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 import logging
 import threading
 import time
+from zoneinfo import ZoneInfo
 
 from config import Settings, get_settings
 from src.models import MarketRegime, StrategyType, TradeDirection, TradeSignal
@@ -51,15 +52,18 @@ class GateDecision:
     reason: str = ""
 
 
+_NEW_YORK = ZoneInfo("America/New_York")
+
+
 def fx_market_open(now: datetime | None = None) -> bool:
-    """Spot FX/metals trade from Sunday ~22:00 UTC to Friday ~21:00 UTC."""
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    weekday, hour = now.weekday(), now.hour
+    """Use the conventional Sunday 17:00–Friday 17:00 New York schedule."""
+    current = (now or datetime.now(timezone.utc)).astimezone(_NEW_YORK)
+    weekday = current.weekday()
     if weekday == 5:
         return False
-    if weekday == 4 and hour >= 21:
+    if weekday == 4 and current.hour >= 17:
         return False
-    if weekday == 6 and hour < 22:
+    if weekday == 6 and current.hour < 17:
         return False
     return True
 

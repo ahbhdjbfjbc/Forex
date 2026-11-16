@@ -1,11 +1,8 @@
 """Pip math, lot sizing, and risk/reward calculations.
 
-Known simplification: pip value is converted to USD using the pair's own
-last price when the quote currency isn't USD (exact for USD-quoted majors
-and for USDJPY; an approximation for cross pairs like EURJPY or EURGBP,
-which technically need a separate quote-currency/USD rate). Flagged here
-rather than silently assumed — swap in a real conversion feed if cross-pair
-lot sizing needs to be exact.
+Historical/offline callers may use an explicitly documented approximation for
+non-USD quote currencies. Live repricing fetches an independent, fresh OANDA
+conversion quote for every cross pair and fails closed if it is unavailable.
 """
 from __future__ import annotations
 
@@ -26,14 +23,26 @@ def price_to_pips(symbol: str, price_diff: float) -> float:
     return abs(price_diff) / pip_size(symbol)
 
 
-def pip_value_per_lot(symbol: str, price: float, lot_units: float = STANDARD_LOT_UNITS) -> float:
+def pip_value_per_lot(
+    symbol: str,
+    price: float,
+    lot_units: float = STANDARD_LOT_UNITS,
+    *,
+    quote_to_usd_rate: float | None = None,
+) -> float:
     """USD value of a 1-pip move for `lot_units` units of `symbol`."""
     quote_ccy = symbol.upper().replace("=X", "")[-3:]
     raw_pip_value = pip_size(symbol) * lot_units
     if quote_ccy == "USD":
         return raw_pip_value
+    if quote_to_usd_rate is not None:
+        if not math.isfinite(quote_to_usd_rate) or quote_to_usd_rate <= 0:
+            return 0.0
+        return raw_pip_value * quote_to_usd_rate
     if price <= 0:
         return 0.0
+    # Offline/historical estimate only. Live publication supplies an exact
+    # quote-currency conversion rate through reprice_signal_to_quote below.
     return raw_pip_value / price
 
 
@@ -80,9 +89,13 @@ def build_risk_parameters(
     risk_percent: float,
     entry_price: float,
     stop_loss_price: float,
+    *,
+    quote_to_usd_rate: float | None = None,
 ) -> RiskParameters:
     sl_pips = price_to_pips(symbol, entry_price - stop_loss_price)
-    pip_val = pip_value_per_lot(symbol, entry_price)
+    pip_val = pip_value_per_lot(
+        symbol, entry_price, quote_to_usd_rate=quote_to_usd_rate
+    )
     lots = calculate_lot_size(account_size_usd, risk_percent, sl_pips, pip_val)
     return RiskParameters(
         account_size_usd=account_size_usd,
@@ -110,6 +123,36 @@ def calculate_unit_size(
         return 0.0
     risk_amount = account_size_usd * (risk_percent / 100)
     return round(risk_amount / distance, 4)
+
+
+def _live_quote_to_usd_rate(symbol: str, settings) -> float:
+    """Convert one unit of the FX quote currency to USD at a fresh OANDA rate."""
+    normalized = str(symbol).upper().replace("=X", "").replace("/", "")
+    quote_currency = normalized[-3:]
+    if quote_currency == "USD":
+        return 1.0
+    if len(normalized) != 6 or not normalized.isalpha():
+        raise ValueError("cannot determine quote currency for live lot sizing")
+
+    from src.data_provider import ensure_live_quote_fresh, get_oanda_live_quote
+
+    try:
+        direct = get_oanda_live_quote(f"{quote_currency}USD", settings)
+        ensure_live_quote_fresh(
+            direct, int(getattr(settings, "oanda_quote_max_age_seconds", 30))
+        )
+        return float(direct.bid)
+    except Exception:
+        try:
+            inverse = get_oanda_live_quote(f"USD{quote_currency}", settings)
+            ensure_live_quote_fresh(
+                inverse, int(getattr(settings, "oanda_quote_max_age_seconds", 30))
+            )
+            return 1.0 / float(inverse.ask)
+        except Exception as inverse_error:
+            raise ValueError(
+                f"fresh OANDA conversion unavailable for {quote_currency}/USD"
+            ) from inverse_error
 
 
 def reprice_signal_to_quote(signal, quote, settings, max_entry_drift_r: float = 0.25):
@@ -145,9 +188,13 @@ def reprice_signal_to_quote(signal, quote, settings, max_entry_drift_r: float = 
 
     symbol = signal.symbol
     if instrument_type(symbol) == "FX":
+        quote_currency = str(symbol).upper().replace("=X", "").replace("/", "")[-3:]
+        conversion_rate = (
+            _live_quote_to_usd_rate(symbol, settings) if quote_currency != "USD" else None
+        )
         risk_params = build_risk_parameters(
             symbol, settings.account_size_usd, settings.risk_percent_per_trade,
-            new_entry, new_stop,
+            new_entry, new_stop, quote_to_usd_rate=conversion_rate,
         )
         sl_distance = risk_params.stop_loss_pips
         tp1_distance = round(price_to_pips(symbol, new_tp1 - new_entry), 1)

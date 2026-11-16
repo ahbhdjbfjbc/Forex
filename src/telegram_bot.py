@@ -331,8 +331,8 @@ def _format_found_report(
     if kind == "FX":
         sl_line = f"🛑 وقف الخسارة: {signal.stop_loss_price} (-{signal.stop_loss_pips:g} نقطة)"
         target_line = (
-            f"🎯 الهدف الوحيد: {signal.take_profit_2_price} "
-            f"(+{signal.take_profit_2_pips:g} نقطة | العائد 1:{signal.take_profit_2_rr:g})"
+            f"🎯 TP1: {signal.take_profit_1_price} (+{signal.take_profit_1_pips:g} نقطة | 1:{signal.take_profit_1_rr:g})\n"
+            f"🎯 TP2 النهائي: {signal.take_profit_2_price} (+{signal.take_profit_2_pips:g} نقطة | 1:{signal.take_profit_2_rr:g})"
         )
         size_line = (
             f"📦 اللوت المقترح: {signal.risk.lot_size:g} لوت "
@@ -350,8 +350,8 @@ def _format_found_report(
         )
         sl_line = f"🛑 وقف الخسارة: {signal.stop_loss_price} (-{signal.stop_loss_pips:g})"
         target_line = (
-            f"🎯 الهدف الوحيد: {signal.take_profit_2_price} "
-            f"(+{signal.take_profit_2_pips:g} | العائد 1:{signal.take_profit_2_rr:g})"
+            f"🎯 TP1: {signal.take_profit_1_price} (+{signal.take_profit_1_pips:g} | 1:{signal.take_profit_1_rr:g})\n"
+            f"🎯 TP2 النهائي: {signal.take_profit_2_price} (+{signal.take_profit_2_pips:g} | 1:{signal.take_profit_2_rr:g})"
         )
         size_line = (
             f"📦 الحجم المقترح: {signal.risk.lot_size:g} {unit_label} "
@@ -377,7 +377,7 @@ def _format_found_report(
             target_line,
             *(
                 [f"⚠️ مصدر الذهب: GC=F (عقود COMEX الآجلة)، وليس سعراً فورياً XAUUSD"]
-                if symbol.upper() == "XAUUSD"
+                if symbol.upper() == "XAUUSD" and str(df.attrs.get("provider", "")).lower() == "yfinance"
                 else []
             ),
             size_line,
@@ -529,7 +529,7 @@ def run_full_watchlist_scan(settings: Settings | None = None) -> str:
                 state = f"لم تُنشر: {delivery.blocked_reason}"
             elif delivery.get("duplicate"):
                 state = "لديها توصية نشطة بالفعل؛ لم تُكرر الرسالة"
-            elif any(value for channel, value in delivery.items() if channel != "duplicate"):
+            elif delivery.get("telegram") is True:
                 state = "تم إرسالها"
             else:
                 state = "تعذر إرسالها؛ تحقق من إعدادات قنوات الإشعار"
@@ -1437,7 +1437,7 @@ def _format_summary_line(summary: dict) -> str:
     return (
         f"📈 النتائج: مغلقة {summary['closed']} | ربح {summary['wins']} | خسارة {summary['losses']} | "
         f"ملتبسة {summary['ambiguous']} | مفتوحة {summary['active']}\n"
-        f"🎯 نسبة الربح الفعلية: {win_rate} | مجموع R: {summary['total_r']:+g} | متوسط: {avg}"
+        f"🎯 نسبة الفوز التقديرية: {win_rate} | مجموع R النظري: {summary['total_r']:+g} | متوسط: {avg}"
     )
 
 
@@ -1498,7 +1498,7 @@ def format_trade_details(row: dict) -> str:
         f"⭐ تقييم الشروط: {row.get('quality_score') or '—'}/100 {row.get('quality_grade') or ''}",
         f"📍 الدخول: {price(row.get('entry_price'))}",
         f"🛑 وقف الخسارة: {price(row.get('stop_loss'))}",
-        f"🎯 الهدف: {price(row.get('take_profit_2'))}",
+        f"🎯 TP1: {price(row.get('take_profit_1'))} | TP2 النهائي: {price(row.get('take_profit_2'))}",
         f"🕒 الفتح: {str(row.get('opened_at') or '')[:19].replace('T', ' ')} UTC",
         f"🏁 الحالة: {_outcome_label(row)}",
     ]
