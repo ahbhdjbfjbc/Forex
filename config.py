@@ -30,12 +30,12 @@ class Settings(BaseSettings):
     atr_expansion_multiplier: float = 1.5
     bb_squeeze_percentile: float = 20.0
 
-    # OANDA is used only for read-only quotes and candles by the market-data
-    # adapter. Order execution remains a separate, practice-only module.
+    # OANDA market data is read-only and defaults to the live pricing endpoint.
+    # Order execution remains separate, opt-in, and hard-locked to Practice.
     data_provider: str = "oanda"
     oanda_api_token: str = ""
     oanda_account_id: str = ""
-    oanda_environment: str = "practice"
+    oanda_environment: str = "live"
     oanda_quote_max_age_seconds: int = 30
     scan_interval_seconds: int = 300
 

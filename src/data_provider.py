@@ -118,7 +118,7 @@ def _oanda_credentials(settings=None) -> tuple[str, str, str]:
         settings = get_settings()
     token = str(getattr(settings, "oanda_api_token", "") or "").strip()
     account_id = str(getattr(settings, "oanda_account_id", "") or "").strip()
-    environment = str(getattr(settings, "oanda_environment", "practice") or "practice").strip().lower()
+    environment = str(getattr(settings, "oanda_environment", "live") or "live").strip().lower()
     if not token:
         raise DataFetchError("OANDA_API_TOKEN is not configured")
     if environment not in _OANDA_REST_URLS:
@@ -143,6 +143,15 @@ def fetch_ohlcv_oanda(request: OHLCVRequest, settings=None) -> pd.DataFrame:
         )
     except httpx.HTTPError as exc:
         raise DataFetchError(f"OANDA candles request failed ({type(exc).__name__})") from exc
+    if response.status_code == 401:
+        raise DataFetchError(
+            "OANDA candles authentication failed (HTTP 401): verify OANDA_API_TOKEN "
+            "and that OANDA_ENVIRONMENT matches the account that issued it"
+        )
+    if response.status_code == 403:
+        raise DataFetchError(
+            "OANDA denied candle access (HTTP 403): verify v20 API eligibility and account permissions"
+        )
     if response.status_code != 200:
         raise DataFetchError(f"OANDA candles request failed (HTTP {response.status_code})")
     try:
@@ -206,6 +215,20 @@ def get_oanda_live_quote(symbol: str, settings=None, *, use_cache: bool = True) 
         )
     except httpx.HTTPError as exc:
         raise DataFetchError(f"OANDA quote request failed ({type(exc).__name__})") from exc
+    if response.status_code == 401:
+        raise DataFetchError(
+            "OANDA quote authentication failed (HTTP 401): verify OANDA_API_TOKEN, "
+            "OANDA_ACCOUNT_ID, and matching OANDA_ENVIRONMENT"
+        )
+    if response.status_code == 403:
+        raise DataFetchError(
+            "OANDA denied quote access (HTTP 403): verify this account is authorized for v20 pricing"
+        )
+    if response.status_code == 404:
+        raise DataFetchError(
+            "OANDA quote account or instrument was not found (HTTP 404): verify OANDA_ACCOUNT_ID "
+            "and OANDA_ENVIRONMENT"
+        )
     if response.status_code != 200:
         raise DataFetchError(f"OANDA quote request failed (HTTP {response.status_code})")
     try:

@@ -62,6 +62,8 @@ environment variables, persistent storage, and health-check settings.
 > publication if OANDA credentials are absent, the quote is stale/non-tradeable,
 > or OANDA is unavailable; it never falls back to Yahoo. Set `OANDA_API_TOKEN`,
 > `OANDA_ACCOUNT_ID`, and `OANDA_ENVIRONMENT` in the deployment secret store.
+> The market-data environment defaults to `live` (read-only); it must match the
+> account/token. Order execution is separate, disabled by default, and Practice-only.
 > Local mocked tests do not prove a live account connection, production
 > deployment, profitability, or broker fills. Outcome tracking is still an
 > OHLCV-based estimate, not realized account P&L.

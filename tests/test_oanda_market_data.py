@@ -17,6 +17,21 @@ SETTINGS = SimpleNamespace(
 )
 
 
+def test_market_data_defaults_to_live_but_order_execution_stays_practice_only():
+    from config import Settings
+
+    settings = Settings(_env_file=None)
+    assert settings.oanda_environment == "live"
+    assert settings.paper_trading_env == "practice"
+    assert settings.enable_paper_trading is False
+
+
+def test_missing_oanda_environment_fallback_is_live_for_read_only_data():
+    settings = SimpleNamespace(oanda_api_token="token", oanda_account_id="account")
+    _token, _account_id, base_url = data_provider._oanda_credentials(settings)
+    assert base_url == data_provider._OANDA_REST_URLS["live"]
+
+
 def test_oanda_symbol_normalization_is_limited_to_fx_and_metals():
     assert data_provider._oanda_instrument("EURUSD=X") == "EUR_USD"
     assert data_provider._oanda_instrument("EUR/USD") == "EUR_USD"
@@ -71,6 +86,16 @@ def test_oanda_candles_reject_non_200_and_malformed_payload(monkeypatch):
     )
     with pytest.raises(data_provider.DataFetchError, match="HTTP 401"):
         data_provider.fetch_ohlcv_oanda(data_provider.OHLCVRequest("EURUSD", "1h"), SETTINGS)
+
+
+def test_oanda_quote_401_explains_credential_and_environment_mismatch(monkeypatch):
+    url = "https://api-fxtrade.oanda.com/v3/accounts/test-account/pricing"
+    monkeypatch.setattr(
+        data_provider.httpx, "get",
+        lambda *_args, **_kwargs: httpx.Response(401, request=httpx.Request("GET", url)),
+    )
+    with pytest.raises(data_provider.DataFetchError, match="OANDA_API_TOKEN, OANDA_ACCOUNT_ID"):
+        data_provider.get_oanda_live_quote("EURUSD", SETTINGS, use_cache=False)
 
 
 def test_oanda_quote_parsing_checks_bid_ask_time_and_trade_status(monkeypatch):

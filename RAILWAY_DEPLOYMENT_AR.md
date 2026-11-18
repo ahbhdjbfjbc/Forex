@@ -25,7 +25,7 @@
 - `WEBHOOK_SHARED_SECRET`: استخدم قيمة عشوائية فريدة بطول 32 محرفاً على الأقل عند استقبال تنبيهات TradingView. لا تستخدم القيمة الافتراضية أو أمثلة `.env.example`.
 - `TELEGRAM_ALLOWED_USER_ID`: مطلوب لكل أوامر البوت، في المحادثة الخاصة والمجموعات؛ ضع المعرّف الرقمي لحساب المالك المسموح فقط. عند استخدام مجموعة، اضبط `TELEGRAM_CHAT_ID` أيضاً على معرّف المجموعة، إذ يلزم تطابق المستخدم والمحادثة معاً.
 - `DATA_PROVIDER=oanda`: اختر موصل أسعار OANDA. احذف/غيّر أي قيمة قديمة مثل `yfinance` لأن Yahoo لا يجتاز بوابة النشر اللحظي.
-- `OANDA_ENVIRONMENT=live`: استخدم `live` لحساب fxTrade الحقيقي أو `practice` لاختبار Practice. يحدد هذا نقطة API ولا يضع أوامر تداول.
+- `OANDA_ENVIRONMENT=live`: يختار واجهة الأسعار الحية read-only؛ غيّره صراحةً إلى `practice` فقط إذا كان التوكن ورقم الحساب لحساب Practice. هذا المتغير لا يرسل أوامر. التنفيذ التجريبي منفصل، معطّل افتراضياً، ومقيّد بـ`PAPER_TRADING_ENV=practice`.
 - `OANDA_API_TOKEN`: رمز Personal Access Token الخاص بـOANDA. اعتبره كلمة مرور؛ لا تحفظه في Git أو Telegram أو الكود، وخزّنه في Railway Variables فقط. توضح OANDA أن الرمز الشخصي يتيح الوصول إلى الحسابات الفرعية المرتبطة.
 - `OANDA_ACCOUNT_ID`: معرف الحساب المرتبط بالرمز، ويستخدم لجلب السعر الحالي؛ لا تخلطه مع `PAPER_ACCOUNT_ID`.
 - `OANDA_QUOTE_MAX_AGE_SECONDS=30`: أقصى عمر لعرض السعر الحالي. السعر القديم أو الأصل غير القابل للتداول يمنع النشر.
@@ -33,7 +33,11 @@
 - إعدادات `WATCHLIST` و`TIMEFRAMES` و`RISK_PERCENT_PER_TRADE` و`MIN_SIGNAL_CONFIDENCE` اختيارية ولها قيم افتراضية في المشروع.
 - `ENABLE_PAPER_TRADING` الافتراضي `false`. تكامل OANDA Practice اختياري ومنفصل عن موصل بيانات الأسعار؛ لا يستخدم موصل السوق بيانات هذا المتغير ولا يرسل أوامر.
 
-للحصول على القيم: سجّل الدخول إلى حساب OANDA fxTrade، وأنشئ/انسخ Personal Access Token من إعداد Manage API Access، وخذ Account ID من الحساب. يجب أن يتطابق `OANDA_ENVIRONMENT` مع نوع الحساب والرمز. إذا لم يدعم الحساب زوجاً أو معدناً، يفشل جلبه بأمان ولا يعود التطبيق إلى Yahoo. الموصل يدعم أزواج العملات والمعادن `XAUUSD` و`XAGUSD` المتاحة في الحساب، ولا يدعم العملات المشفرة.
+**إنشاء OANDA Personal Access Token:** افتح [بوابة إدارة حساب OANDA](https://www.oanda.com/account/tpa/personal_token) وسجّل الدخول إلى حساب fxTrade المقصود. من `My Account` ثم `My Services` اختر `Manage API Access`، وافق على اتفاقية API إذا طُلبت، ثم أنشئ Personal Access Token وانسخه مباشرة إلى Secret في Railway. OANDA لا تحتفظ بالتوكن لاستعادته لاحقاً؛ إذا ضاع، ألغِه وأنشئ غيره. هذا التوكن حساس ككلمة المرور ويمنح الوصول إلى الحسابات الفرعية المرتبطة به، لذلك لا ترسله في المحادثة أو Telegram أو GitHub ولا تضعه في رابط URL. راجع [تعليمات المصادقة الرسمية](https://developer.oanda.com/rest-live-v20/authentication/).
+
+**معرّف الحساب والبيئة:** خذ `OANDA_ACCOUNT_ID` من الحساب المرتبط بالتوكن، أو تحقق من الحسابات المصرح بها عبر `GET /v3/accounts` على مضيف البيئة المطابقة، مع إرسال التوكن في رأس `Authorization: Bearer ...` فقط؛ يشرح [مرجع الحسابات الرسمي](https://developer.oanda.com/rest-live-v20/account-ep/) هذا الطلب. استخدم `OANDA_ENVIRONMENT=live` مع توكن/حساب fxTrade Live، أو `practice` مع توكن/حساب fxTrade Practice. لا تخلطهما؛ المضيفان مختلفان بحسب [دليل OANDA للبيئات](https://developer.oanda.com/rest-live-v20/development-guide/). يتطلب REST v20 حساب fxTrade مدعوماً؛ تذكر [صفحة البدء الرسمية](https://developer.oanda.com/rest-live-v20/introduction/) أن API غير متاح لجميع أقسام OANDA، ومنها OANDA Global Markets وOANDA TMS Brokers S.A. إذا لم يظهر خيار `Manage API Access` أو لم يقبل OANDA طلب التوكن، تحقّق من أهلية نوع الحساب وتواصل مع دعم OANDA؛ لا يستطيع التطبيق إنشاء التوكن نيابةً عن صاحب الحساب.
+
+إذا فُقد التوكن أو كُشف، ألغِه من `Manage API Access` وأنشئ آخر، ثم حدّث Railway Variables وأعد النشر. يجب أن يتطابق `OANDA_ENVIRONMENT` مع نوع الحساب والتوكن. إذا لم يدعم الحساب زوجاً أو معدناً، يفشل جلبه بأمان ولا يعود التطبيق إلى Yahoo. الموصل يدعم أزواج العملات والمعادن `XAUUSD` و`XAGUSD` المتاحة في الحساب، ولا يدعم العملات المشفرة.
 
 ## حفظ الحالة
 
