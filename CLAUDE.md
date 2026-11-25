@@ -37,7 +37,7 @@ forex_scanner_bot/
 │   └── breakout.py              # BreakoutStrategy + BreakoutParams
 ├── src/
 │   ├── models.py                # shared pydantic/dataclass schemas
-│   ├── data_provider.py         # OHLCV fetch (yfinance / tradingview_ta), retries
+│   ├── data_provider.py         # Twelve Data / yfinance OHLCV fetch, quote, pacing and retries
 │   ├── indicators.py            # pure indicator math (ADX, EMA, ATR, BB, RSI, Donchian, Keltner)
 │   ├── session_utils.py         # forex session detection + RVOL
 │   ├── risk.py                   # pip/unit value, lot/position sizing, R:R math
@@ -64,7 +64,7 @@ forex_scanner_bot/
 
 | Module | Owns | Must NOT do |
 |---|---|---|
-| `src/data_provider.py` | Fetching/caching OHLCV from yfinance / tradingview_ta, retries, rate-limit handling | Any indicator math or regime logic |
+| `src/data_provider.py` | Fetching Twelve Data OHLCV/midpoint and optional Yahoo bars, normalization, caching, retries and rate-limit handling | Any indicator math or regime logic |
 | `src/indicators.py` | Pure indicator functions — stateless, numpy/pandas in, values out | Fetching data, knowing about "regime" or "strategy" |
 | `src/session_utils.py` | Forex session (Asian/London/NY/overlap) + RVOL calc | Indicator math |
 | `src/risk.py` | Pip/unit value, lot/position sizing, R:R math | Regime/strategy logic |

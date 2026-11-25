@@ -1,5 +1,7 @@
 # تقرير ربط OANDA وTradingView — 2026-11-11
 
+> **ملاحظة تحديث (2026-11-24):** هذا تقرير تاريخي يصف نسخة سابقة ولا يمثل إعداد مصدر الأسعار الحالي. جرى استبدال موصل أسعار السوق بـTwelve Data؛ راجع [دليل التشغيل والنشر الحالي](دليل_التشغيل_والنشر.md). الإعداد الحالي للأسعار هو `DATA_PROVIDER=twelvedata` مع `TWELVEDATA_API_KEY`، والسعر المستخدم midpoint وليس Bid/Ask. يبقى OANDA Practice تكاملاً منفصلاً اختيارياً للتداول الورقي فقط.
+
 ## الخلاصة
 
 أُضيف إلى المشروع موصل OANDA v20 لقراءة الشموع المكتملة وعروض الأسعار الحالية، وربطت مستويات وقف الخسارة والهدفين المحسوبة في Pine Script بمسار التحقق والنشر. يظل الكود **قراءة أسعار فقط**: لا يرسل أوامر تداول ولا يفتح صفقات. ولم يُختبر حساب حي في هذه الجولة لأن أسرار OANDA وخدمة Railway غير متاحة في بيئة العمل؛ لذلك هذا التقرير يصف كوداً منفذاً واختبارات محلية، لا يزعم أن النظام متصل أو يعمل فعلياً على حسابك.
@@ -22,17 +24,15 @@
 
 | المتغير | المطلوب |
 |---|---|
-| `DATA_PROVIDER` | `oanda` |
-| `OANDA_ENVIRONMENT` | `live` لحساب fxTrade الحقيقي؛ أو `practice` لاختبار Practice فقط |
-| `OANDA_API_TOKEN` | Personal Access Token من OANDA. تعامل معه ككلمة مرور ولا ترسله في المحادثة أو الشيفرة |
-| `OANDA_ACCOUNT_ID` | رقم الحساب المرتبط بالرمز، ويستخدم لطلب الأسعار الحالية |
-| `OANDA_QUOTE_MAX_AGE_SECONDS` | `30` افتراضياً؛ يُرفض السعر إذا تجاوز عمره هذه القيمة |
+| `DATA_PROVIDER` | `twelvedata` لمصدر الأسعار الحالي |
+| `TWELVEDATA_API_KEY` | مفتاح Twelve Data؛ أضفه إلى أسرار Railway ولا تحفظه في Git |
+| `TWELVEDATA_QUOTE_MAX_AGE_SECONDS` | `90` افتراضياً؛ حد عمر midpoint الحالي |
 | `WEBHOOK_SHARED_SECRET` | سر عشوائي فريد بطول 32 محرفاً على الأقل، ويجب أن يطابق خانة السر في إعداد المؤشر/التنبيه |
 | `TELEGRAM_BOT_TOKEN` | رمز BotFather عند استخدام Telegram |
 | `TELEGRAM_ALLOWED_USER_ID` | رقم مستخدم Telegram المصرح له بالأوامر |
 | `TELEGRAM_CHANNEL_ID` | قناة الإشارات الصريحة التي يملك البوت صلاحية النشر فيها |
 
-لا تخلط `OANDA_API_TOKEN` مع `PAPER_API_TOKEN`؛ موصل الأسعار يقرأ السوق ولا يرسل أوامر. كما أن `ENABLE_PAPER_TRADING` و`PAPER_ACCOUNT_ID` إعدادان منفصلان، والتداول الورقي يبقى معطلاً ما لم يُفعّل صراحة.
+بيانات أسعار السوق ومفتاح Twelve Data منفصلان عن `PAPER_API_TOKEN` و`PAPER_ACCOUNT_ID`؛ يبقى `ENABLE_PAPER_TRADING` معطلاً ما لم يُفعّل صراحة.
 
 ## ربط Alert في TradingView
 
@@ -40,7 +40,7 @@
 2. افتح الرمز والفريم نفسيهما اللذين تريد مراقبتهما، ثم أضف `pine_script/tv_indicator.pine` إلى الرسم.
 3. ضع قيمة `WEBHOOK_SHARED_SECRET` ذاتها في مدخل المؤشر، وأنشئ Alert جديداً.
 4. اختر **Any alert() function call**، وضع URL أعلاه في Webhook URL. لا تستخدم `alertcondition()` للحصول على JSON الكامل.
-5. اختبر الاتصال بـOANDA عبر `GET /health/market?symbol=EURUSD` مع رأس `X-Webhook-Secret` بقيمة `WEBHOOK_SHARED_SECRET`، ثم تحقق من سجلات الخدمة وAlert log. `/health/market` يعرض quote الحديثة فقط ولا ينفذ أوامر؛ أما `GET /health` فيثبت أن HTTP يستجيب فقط.
+5. اختبر اتصال بيانات السوق الحالي عبر `GET /health/market?symbol=EURUSD` مع رأس `X-Webhook-Secret` بقيمة `WEBHOOK_SHARED_SECRET`، ثم تحقق من سجلات الخدمة وAlert log. `/health/market` يعرض midpoint الحديث و`price_basis` ولا ينفذ أوامر؛ أما `GET /health` فيثبت أن HTTP يستجيب فقط.
 
 قد لا يطابق رمز TradingView أداة OANDA المتاحة في الحساب أو قد يختلف مصدر السعر/السبريد؛ عندها يرفض النظام التنبيه ولا ينشر توصية. كذلك لا يعني نجاح webhook أن وسيطاً نفذ صفقة.
 

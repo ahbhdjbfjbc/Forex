@@ -5,8 +5,9 @@ hourly auto-scan, the admin `/scan_all` command, the manual publish button
 and the TradingView webhook. Calling this gate there guarantees that every
 path applies the same rules:
 
-1. the implemented OANDA v20 adapter and a current, tradeable, timestamped
-   Bid/Ask quote (historical or delayed bars alone are not enough);
+1. the implemented Twelve Data adapter and a current, timestamped midpoint
+   observation (historical or delayed bars alone are not enough; Twelve Data
+   does not provide Bid/Ask in the documented quote contract);
 2. high-impact news for the instrument's own currencies (fails closed when
    the calendar is unavailable — the same policy as the original filter);
 3. FX/metals market hours (mandatory; cannot be disabled by environment);
@@ -35,9 +36,9 @@ from src.symbol_resolver import instrument_type, sanitize_symbol, to_yfinance_ti
 
 logger = logging.getLogger(__name__)
 
-# OANDA is registered only because its adapter supplies a timestamped quote;
-# every publication still verifies a fresh quote at runtime.
-_VERIFIED_REALTIME_PROVIDER_NAMES: frozenset[str] = frozenset({"oanda"})
+# Twelve Data is accepted only after its midpoint timestamp and market status
+# pass runtime checks; midpoint data are not represented as executable quotes.
+_VERIFIED_REALTIME_PROVIDER_NAMES: frozenset[str] = frozenset({"twelvedata"})
 
 HIGHER_TIMEFRAME = {
     "1m": "15m", "5m": "1h", "15m": "1h", "30m": "4h",
@@ -105,23 +106,23 @@ def _check_live_data_source(settings: Settings, symbol: str | None = None, live_
     """Require an implemented provider whose real-time capability is verified."""
     provider = str(getattr(settings, "data_provider", "") or "").strip().lower()
     if is_verified_realtime_provider(provider):
-        if provider == "oanda":
+        if provider == "twelvedata":
             if not symbol:
-                return GateDecision(False, "تعذر تحديد الرمز للتحقق من سعر OANDA الحي")
+                return GateDecision(False, "تعذر تحديد الرمز للتحقق من سعر Twelve Data")
             try:
                 from src.data_provider import (
                     DataFetchError,
                     ensure_live_quote_fresh,
-                    get_oanda_live_quote,
+                    get_live_quote,
                 )
 
-                quote = live_quote or get_oanda_live_quote(symbol, settings)
+                quote = live_quote or get_live_quote(symbol, settings)
                 ensure_live_quote_fresh(
                     quote,
-                    int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
+                    int(getattr(settings, "twelvedata_quote_max_age_seconds", 90)),
                 )
             except (DataFetchError, TypeError, ValueError):
-                return GateDecision(False, "تعذر التحقق من سعر OANDA حديث؛ أُوقف النشر احترازياً.")
+                return GateDecision(False, "تعذر التحقق من سعر Twelve Data حديث؛ أُوقف النشر احترازياً.")
         return GateDecision(True)
     if provider == "yfinance":
         return GateDecision(

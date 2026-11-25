@@ -41,14 +41,14 @@ def test_webhook_enforces_per_peer_rate_limit(monkeypatch):
         account_size_usd=10_000.0,
         risk_percent_per_trade=1.0,
         min_risk_reward=2.0,
-        data_provider="oanda",
-        oanda_quote_max_age_seconds=30,
+        data_provider="twelvedata",
+        twelvedata_quote_max_age_seconds=30,
     ))
     monkeypatch.setattr(bridge, "send_alert", lambda signal, **_kwargs: {
         "telegram": True, "discord": False, "desktop": False,
     })
     monkeypatch.setattr(
-        "src.data_provider.get_oanda_live_quote",
+        "src.data_provider.get_live_quote",
         lambda *_args, **_kwargs: LiveQuote(
             "EUR_USD", 1.0849, 1.0851, datetime.now(timezone.utc), "tradeable"
         ),

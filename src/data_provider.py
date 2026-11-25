@@ -1,15 +1,13 @@
-"""OHLCV data acquisition.
+"""Market-data acquisition for Twelve Data and explicitly selected Yahoo fallback.
 
-`oanda` is the configured live-source adapter: it fetches completed v20
-midpoint candles and separate timestamped account Bid/Ask quotes. `yfinance`
-remains available only when explicitly selected, and its historical/delayed
-bars are rejected by the live publication gate. `tradingview_ta` is optional
-confirmation only and is not a price-data source for publication.
+Twelve Data supplies completed OHLCV candles and a timestamped midpoint price.
+Its documented endpoints do not provide bid/ask, so midpoint quotes stay
+explicitly midpoint-only and are never represented as executable top-of-book.
+Yahoo remains historical/delayed fallback only and fails the publication gate.
 
-OHLCV fetches fail soft and return `None` when a symbol cannot be loaded, so
-one bad symbol never kills a full watchlist scan. Current-quote calls raise a
-typed `DataFetchError`; publication and webhook boundaries catch it and fail
-closed rather than silently falling back to another price source.
+Failures for candles return ``None`` so one unavailable instrument does not
+stop a watchlist scan. Current-price failures raise ``DataFetchError`` and all
+publication boundaries fail closed; no provider fallback is performed.
 """
 from __future__ import annotations
 
@@ -27,39 +25,33 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# yfinance has no native "4h" bar; we pull hourly bars and resample.
-_BASE_INTERVAL = {
-    "15m": "15m",
-    "30m": "30m",
-    "1h": "1h",
-    "4h": "1h",
-    "1d": "1d",
+_TWELVEDATA_BASE_URL = "https://api.twelvedata.com"
+_TWELVEDATA_INTERVALS = {
+    "15m": "15min", "30m": "30min", "1h": "1h", "4h": "4h", "1d": "1day",
 }
-_MAX_PERIOD = {
-    "15m": "60d",
-    "30m": "60d",
-    "1h": "730d",
-    "4h": "730d",
-    "1d": "5y",
+_TIMEFRAME_DELTAS = {
+    "15m": timedelta(minutes=15), "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1), "4h": timedelta(hours=4), "1d": timedelta(days=1),
 }
-_RESAMPLE_RULE = {"4h": "4h"}
-_OANDA_REST_URLS = {
-    "practice": "https://api-fxpractice.oanda.com",
-    "live": "https://api-fxtrade.oanda.com",
+_MAX_BAR_AGE = {
+    "15m": timedelta(minutes=25), "30m": timedelta(minutes=45),
+    "1h": timedelta(hours=1, minutes=15), "4h": timedelta(hours=4, minutes=15),
+    "1d": timedelta(hours=30),
 }
-_OANDA_GRANULARITIES = {"15m": "M15", "30m": "M30", "1h": "H1", "4h": "H4", "1d": "D"}
-_OANDA_CURRENCIES = frozenset({
+_SUPPORTED_CURRENCIES = frozenset({
     "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "CNY", "CNH",
     "HKD", "SGD", "MXN", "ZAR", "TRY", "NOK", "SEK", "DKK", "PLN", "CZK",
     "HUF", "ILS", "THB", "INR", "KRW", "PHP", "IDR", "MYR", "TWD", "BRL",
     "RUB", "AED", "SAR", "QAR", "KWD", "BHD", "OMR", "CLP", "COP", "PEN",
     "ARS", "RON", "ISK",
 })
-_OANDA_QUOTE_CACHE: dict[tuple[str, str, str], tuple[float, "LiveQuote"]] = {}
-_OANDA_QUOTE_CACHE_LOCK = threading.Lock()
-_OANDA_QUOTE_CACHE_SECONDS = 1.0
 
-REQUIRED_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+# Basic has historically documented limits of 8 credits/minute and 800/day.
+# Use headroom for dashboard/other consumers; this is process-local and cannot
+# coordinate multiple app replicas, so Railway should run one scanner instance.
+_LOCAL_CREDITS_PER_MINUTE = 7
+_LOCAL_DAILY_CREDIT_CAP = 700
+_LOCAL_CREDIT_SPACING_SECONDS = 60.0 / _LOCAL_CREDITS_PER_MINUTE
 
 
 class DataFetchError(Exception):
@@ -75,195 +67,268 @@ class OHLCVRequest:
 
 @dataclass(frozen=True)
 class LiveQuote:
-    """OANDA top-of-book snapshot; read-only and never an execution receipt."""
+    """Read-only snapshot; midpoint feeds have no bid/ask fields by design."""
 
     instrument: str
-    bid: float
-    ask: float
+    bid: float | None
+    ask: float | None
     observed_at: datetime
     status: str
+    price_basis: str = "bid_ask"
+    midpoint: float | None = None
 
     @property
     def mid(self) -> float:
+        if self.midpoint is not None:
+            return self.midpoint
+        if self.bid is None or self.ask is None:
+            raise DataFetchError("quote has neither a midpoint nor bid/ask values")
         return (self.bid + self.ask) / 2.0
 
     @property
-    def spread(self) -> float:
+    def spread(self) -> float | None:
+        if self.bid is None or self.ask is None:
+            return None
         return self.ask - self.bid
 
 
-def _oanda_instrument(symbol: str) -> str:
+class _TwelveDataBudget:
+    """Conservative single-process credit pacing for the free plan."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_request = 0.0
+        self._utc_day = datetime.now(timezone.utc).date()
+        self._daily_credits = 0
+
+    def reserve(self) -> None:
+        with self._lock:
+            today = datetime.now(timezone.utc).date()
+            if today != self._utc_day:
+                self._utc_day = today
+                self._daily_credits = 0
+            if self._daily_credits >= _LOCAL_DAILY_CREDIT_CAP:
+                raise DataFetchError(
+                    "Twelve Data local daily safety budget reached; requests paused until the next UTC day"
+                )
+            wait_for = _LOCAL_CREDIT_SPACING_SECONDS - (time.monotonic() - self._last_request)
+            if wait_for > 0:
+                time.sleep(wait_for)
+            self._last_request = time.monotonic()
+            self._daily_credits += 1
+
+
+_TWELVEDATA_BUDGET = _TwelveDataBudget()
+_TWELVEDATA_QUOTE_CACHE: dict[tuple[str, str], tuple[float, LiveQuote]] = {}
+_TWELVEDATA_QUOTE_CACHE_LOCK = threading.Lock()
+_TWELVEDATA_QUOTE_CACHE_SECONDS = 5.0
+_OHLCV_CACHE: dict[tuple[str, str, int], tuple[float, pd.DataFrame]] = {}
+_OHLCV_CACHE_LOCK = threading.Lock()
+_OHLCV_CACHE_SECONDS = 45.0
+
+# yfinance has no native "4h" bar; pull hourly bars and resample.
+_BASE_INTERVAL = {"15m": "15m", "30m": "30m", "1h": "1h", "4h": "1h", "1d": "1d"}
+_MAX_PERIOD = {"15m": "60d", "30m": "60d", "1h": "730d", "4h": "730d", "1d": "5y"}
+_RESAMPLE_RULE = {"4h": "4h"}
+REQUIRED_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+
+
+def normalize_twelvedata_symbol(symbol: str) -> str:
+    """Map FX/metals aliases (EUR_USD, EURUSD=X, XAUUSD) to provider format."""
     raw = str(symbol).upper().strip()
     if ":" in raw:
         raw = raw.rsplit(":", 1)[-1]
-    if raw in {"GC=F", "GC"}:
-        raw = "XAUUSD"
-    elif raw in {"SI=F", "SI"}:
-        raw = "XAGUSD"
-    normalized = raw.replace("=X", "").replace("/", "").replace("_", "")
+    aliases = {"GC=F": "XAUUSD", "GC": "XAUUSD", "SI=F": "XAGUSD", "SI": "XAGUSD"}
+    raw = aliases.get(raw, raw)
+    normalized = raw.replace("=X", "").replace("/", "").replace("_", "").replace("-", "")
     if not re.fullmatch(r"[A-Z]{6}", normalized):
-        raise DataFetchError(f"unsupported OANDA instrument {symbol!r}")
+        raise DataFetchError(f"unsupported Twelve Data instrument {symbol!r}")
     base, quote = normalized[:3], normalized[3:]
     if normalized not in {"XAUUSD", "XAGUSD"} and (
-        base == quote or base not in _OANDA_CURRENCIES or quote not in _OANDA_CURRENCIES
+        base == quote or base not in _SUPPORTED_CURRENCIES or quote not in _SUPPORTED_CURRENCIES
     ):
-        raise DataFetchError(f"unsupported OANDA currency pair {normalized}")
-    return f"{base}_{quote}"
+        raise DataFetchError(f"unsupported Twelve Data currency pair {normalized}")
+    return f"{base}/{quote}"
 
 
-def _oanda_credentials(settings=None) -> tuple[str, str, str]:
+def _twelvedata_api_key(settings=None) -> str:
     if settings is None:
         from config import get_settings
 
         settings = get_settings()
-    token = str(getattr(settings, "oanda_api_token", "") or "").strip()
-    account_id = str(getattr(settings, "oanda_account_id", "") or "").strip()
-    environment = str(getattr(settings, "oanda_environment", "live") or "live").strip().lower()
-    if not token:
-        raise DataFetchError("OANDA_API_TOKEN is not configured")
-    if environment not in _OANDA_REST_URLS:
-        raise DataFetchError("OANDA_ENVIRONMENT must be live or practice")
-    return token, account_id, _OANDA_REST_URLS[environment]
+    api_key = str(getattr(settings, "twelvedata_api_key", "") or "").strip()
+    if not api_key:
+        raise DataFetchError("TWELVEDATA_API_KEY is not configured")
+    return api_key
 
 
-def fetch_ohlcv_oanda(request: OHLCVRequest, settings=None) -> pd.DataFrame:
-    """Fetch completed midpoint candles from OANDA v20; never falls back to Yahoo."""
-    token, _account_id, base_url = _oanda_credentials(settings)
-    instrument = _oanda_instrument(request.symbol)
-    granularity = _OANDA_GRANULARITIES.get(request.timeframe)
-    if granularity is None:
-        raise DataFetchError(f"unsupported OANDA timeframe {request.timeframe!r}")
-    count = min(5000, max(250, int(request.min_bars) + 10))
-    try:
-        response = httpx.get(
-            f"{base_url}/v3/instruments/{instrument}/candles",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"price": "M", "granularity": granularity, "count": count, "smooth": "false"},
-            timeout=5.0,
-        )
-    except httpx.HTTPError as exc:
-        raise DataFetchError(f"OANDA candles request failed ({type(exc).__name__})") from exc
-    if response.status_code == 401:
-        raise DataFetchError(
-            "OANDA candles authentication failed (HTTP 401): verify OANDA_API_TOKEN "
-            "and that OANDA_ENVIRONMENT matches the account that issued it"
-        )
-    if response.status_code == 403:
-        raise DataFetchError(
-            "OANDA denied candle access (HTTP 403): verify v20 API eligibility and account permissions"
-        )
-    if response.status_code != 200:
-        raise DataFetchError(f"OANDA candles request failed (HTTP {response.status_code})")
-    try:
-        payload = response.json()
-        candles = payload.get("candles") if isinstance(payload, dict) else None
-    except (ValueError, TypeError) as exc:
-        raise DataFetchError("OANDA returned invalid candle JSON") from exc
-    if not isinstance(candles, list):
-        raise DataFetchError("OANDA candle response has no candle list")
+def _twelvedata_get(path: str, params: dict[str, object], settings=None) -> dict:
+    api_key = _twelvedata_api_key(settings)
+    headers = {"Authorization": f"apikey {api_key}"}
+    url = f"{_TWELVEDATA_BASE_URL}/{path.lstrip('/')}"
+    last_error: Exception | None = None
+    for attempt in range(2):
+        _TWELVEDATA_BUDGET.reserve()
+        try:
+            response = httpx.get(url, headers=headers, params=params, timeout=8.0)
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(1.0)
+                continue
+            raise DataFetchError(
+                f"Twelve Data request failed ({type(exc).__name__}); this symbol will be skipped"
+            ) from exc
+        if response.status_code >= 500 and attempt == 0:
+            time.sleep(1.0)
+            continue
+        if response.status_code == 401:
+            raise DataFetchError("Twelve Data authentication failed (HTTP 401); check TWELVEDATA_API_KEY")
+        if response.status_code == 403:
+            raise DataFetchError("Twelve Data denied access (HTTP 403); verify plan coverage/permissions")
+        if response.status_code == 429:
+            raise DataFetchError("Twelve Data request limit reached (HTTP 429); this request was skipped")
+        if response.status_code >= 500:
+            raise DataFetchError(f"Twelve Data temporarily unavailable (HTTP {response.status_code})")
+        if response.status_code != 200:
+            raise DataFetchError(f"Twelve Data request failed (HTTP {response.status_code})")
+        try:
+            payload = response.json()
+        except (ValueError, TypeError) as exc:
+            raise DataFetchError("Twelve Data returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise DataFetchError("Twelve Data returned an unexpected response shape")
+        if str(payload.get("status", "")).lower() == "error" or "code" in payload and "message" in payload:
+            code = str(payload.get("code", "unknown"))
+            message = str(payload.get("message", "provider error"))[:180]
+            if code == "429":
+                raise DataFetchError("Twelve Data request credit/rate limit reached; request skipped")
+            if code == "401":
+                raise DataFetchError("Twelve Data rejected TWELVEDATA_API_KEY (provider code 401)")
+            raise DataFetchError(f"Twelve Data API error {code}: {message}")
+        return payload
+    raise DataFetchError("Twelve Data request failed") from last_error
 
+
+def fetch_ohlcv_twelvedata(
+    request: OHLCVRequest, settings=None, *, now: datetime | None = None,
+) -> pd.DataFrame:
+    """Fetch complete UTC OHLCV bars and validate the existing scanner contract."""
+    symbol = normalize_twelvedata_symbol(request.symbol)
+    interval = _TWELVEDATA_INTERVALS.get(request.timeframe)
+    duration = _TIMEFRAME_DELTAS.get(request.timeframe)
+    if interval is None or duration is None:
+        raise DataFetchError(f"unsupported Twelve Data timeframe {request.timeframe!r}")
+    outputsize = min(5000, max(20, int(request.min_bars) + 10))
+    payload = _twelvedata_get(
+        "/time_series",
+        {"symbol": symbol, "interval": interval, "outputsize": outputsize,
+         "timezone": "UTC", "order": "ASC"},
+        settings,
+    )
+    values = payload.get("values")
+    if not isinstance(values, list):
+        raise DataFetchError(f"Twelve Data returned no candle list for {symbol}/{interval}")
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
     rows: list[dict[str, float]] = []
     stamps: list[pd.Timestamp] = []
-    for candle in candles:
-        if not isinstance(candle, dict) or candle.get("complete") is not True:
-            continue
-        mid = candle.get("mid")
-        if not isinstance(mid, dict):
+    volume_reported = True
+    for item in values:
+        if not isinstance(item, dict):
             continue
         try:
-            stamp = pd.Timestamp(candle["time"])
+            stamp = pd.Timestamp(item["datetime"])
             if stamp.tzinfo is None:
-                raise ValueError("OANDA candle timestamp has no timezone")
-            stamp = stamp.tz_convert("UTC")
+                stamp = stamp.tz_localize("UTC")
+            else:
+                stamp = stamp.tz_convert("UTC")
+            if (stamp + duration).to_pydatetime() > current:
+                continue
             row = {
-                "Open": float(mid["o"]), "High": float(mid["h"]),
-                "Low": float(mid["l"]), "Close": float(mid["c"]),
-                "Volume": float(candle.get("volume", 0)),
+                "Open": float(item["open"]), "High": float(item["high"]),
+                "Low": float(item["low"]), "Close": float(item["close"]),
             }
+            raw_volume = item.get("volume")
+            if raw_volume in (None, ""):
+                volume_reported = False
+                row["Volume"] = 0.0
+            else:
+                row["Volume"] = float(raw_volume)
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
-            raise DataFetchError("OANDA returned a malformed completed candle") from exc
+            raise DataFetchError("Twelve Data returned a malformed candle") from exc
         stamps.append(stamp)
         rows.append(row)
     if not rows:
-        raise DataFetchError(f"OANDA returned no completed candles for {instrument}/{request.timeframe}")
+        raise DataFetchError(f"Twelve Data returned no completed candles for {symbol}/{interval}")
     frame = pd.DataFrame(rows, index=pd.DatetimeIndex(stamps, name="Datetime"))
     frame = _validate(frame, request)
-    frame.attrs["provider"] = "oanda"
-    _ensure_fresh(frame, request)
+    frame.attrs["provider"] = "twelvedata"
+    frame.attrs["price_basis"] = "aggregated_midpoint"
+    frame.attrs["volume_reported"] = volume_reported
+    if not volume_reported:
+        logger.info("Twelve Data omitted volume for %s/%s; zero denotes unavailable, not measured volume", symbol, interval)
+    _ensure_fresh(frame, request, now=current)
     return frame
 
 
-def get_oanda_live_quote(symbol: str, settings=None, *, use_cache: bool = True) -> LiveQuote:
-    """Return a fresh read-only OANDA bid/ask quote for a supported instrument."""
-    token, account_id, base_url = _oanda_credentials(settings)
-    if not account_id:
-        raise DataFetchError("OANDA_ACCOUNT_ID is required for current pricing")
-    instrument = _oanda_instrument(symbol)
-    cache_key = (base_url, account_id, instrument)
-    now_monotonic = time.monotonic()
+def get_live_quote(symbol: str, settings=None, *, use_cache: bool = True) -> LiveQuote:
+    """Return Twelve Data's fresh midpoint and timestamp; never synthesize bid/ask."""
+    instrument = normalize_twelvedata_symbol(symbol)
+    cache_key = (_TWELVEDATA_BASE_URL, instrument)
     if use_cache:
-        with _OANDA_QUOTE_CACHE_LOCK:
-            cached = _OANDA_QUOTE_CACHE.get(cache_key)
-            if cached and now_monotonic - cached[0] <= _OANDA_QUOTE_CACHE_SECONDS:
+        with _TWELVEDATA_QUOTE_CACHE_LOCK:
+            cached = _TWELVEDATA_QUOTE_CACHE.get(cache_key)
+            if cached and time.monotonic() - cached[0] <= _TWELVEDATA_QUOTE_CACHE_SECONDS:
                 return cached[1]
+    payload = _twelvedata_get(
+        "/quote", {"symbol": instrument, "timezone": "UTC"}, settings
+    )
     try:
-        response = httpx.get(
-            f"{base_url}/v3/accounts/{account_id}/pricing",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"instruments": instrument},
-            timeout=2.5,
-        )
-    except httpx.HTTPError as exc:
-        raise DataFetchError(f"OANDA quote request failed ({type(exc).__name__})") from exc
-    if response.status_code == 401:
-        raise DataFetchError(
-            "OANDA quote authentication failed (HTTP 401): verify OANDA_API_TOKEN, "
-            "OANDA_ACCOUNT_ID, and matching OANDA_ENVIRONMENT"
-        )
-    if response.status_code == 403:
-        raise DataFetchError(
-            "OANDA denied quote access (HTTP 403): verify this account is authorized for v20 pricing"
-        )
-    if response.status_code == 404:
-        raise DataFetchError(
-            "OANDA quote account or instrument was not found (HTTP 404): verify OANDA_ACCOUNT_ID "
-            "and OANDA_ENVIRONMENT"
-        )
-    if response.status_code != 200:
-        raise DataFetchError(f"OANDA quote request failed (HTTP {response.status_code})")
-    try:
-        body = response.json()
-        items = body.get("prices") if isinstance(body, dict) else None
-        item = next(
-            price for price in items or []
-            if isinstance(price, dict) and price.get("instrument") == instrument
-        )
-        bid = float(item["bids"][0]["price"])
-        ask = float(item["asks"][0]["price"])
-        observed_at = datetime.fromisoformat(str(item["time"]).replace("Z", "+00:00"))
-        status = str(item.get("status", "unknown"))
-    except (ValueError, TypeError, KeyError, IndexError, StopIteration) as exc:
-        raise DataFetchError("OANDA returned a malformed or incomplete quote") from exc
-    if observed_at.tzinfo is None:
-        raise DataFetchError("OANDA quote timestamp has no timezone")
-    observed_at = observed_at.astimezone(timezone.utc)
-    if not all(math.isfinite(value) and value > 0 for value in (bid, ask)) or ask < bid:
-        raise DataFetchError("OANDA returned invalid bid/ask values")
-    quote = LiveQuote(instrument, bid, ask, observed_at, status)
+        price = float(payload["close"])
+        timestamp = float(payload["last_quote_at"])
+        observed_at = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        market_open = payload["is_market_open"]
+    except (KeyError, TypeError, ValueError, OverflowError, OSError) as exc:
+        raise DataFetchError("Twelve Data quote lacks a usable price, last_quote_at, or market-open status") from exc
+    if not math.isfinite(price) or price <= 0 or not math.isfinite(timestamp) or timestamp <= 0:
+        raise DataFetchError("Twelve Data returned an invalid midpoint or observation timestamp")
+    status = "midpoint" if market_open is True else "closed"
+    quote = LiveQuote(
+        instrument=instrument, bid=None, ask=None, observed_at=observed_at,
+        status=status, price_basis="midpoint", midpoint=price,
+    )
     if use_cache:
-        with _OANDA_QUOTE_CACHE_LOCK:
-            _OANDA_QUOTE_CACHE[cache_key] = (time.monotonic(), quote)
+        with _TWELVEDATA_QUOTE_CACHE_LOCK:
+            _TWELVEDATA_QUOTE_CACHE[cache_key] = (time.monotonic(), quote)
     return quote
 
 
-def ensure_live_quote_fresh(quote: LiveQuote, max_age_seconds: int = 30,
-                            now: datetime | None = None) -> None:
+def ensure_live_quote_fresh(
+    quote: LiveQuote, max_age_seconds: int = 90, now: datetime | None = None,
+) -> None:
     current = now or datetime.now(timezone.utc)
-    age = (current - quote.observed_at).total_seconds()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    age = (current.astimezone(timezone.utc) - quote.observed_at).total_seconds()
     if age < -5 or age > max_age_seconds:
-        raise DataFetchError("OANDA quote is in the future or outside the freshness limit")
-    if quote.status.lower() != "tradeable":
-        raise DataFetchError("OANDA instrument is not tradeable at the quote timestamp")
+        raise DataFetchError("Twelve Data midpoint is in the future or outside the freshness limit")
+    if quote.price_basis == "midpoint":
+        if quote.status.lower() != "midpoint" or quote.bid is not None or quote.ask is not None:
+            raise DataFetchError("Twelve Data price is not a valid open-market midpoint")
+        if not math.isfinite(quote.mid) or quote.mid <= 0:
+            raise DataFetchError("Twelve Data midpoint is invalid")
+        return
+    if quote.price_basis != "bid_ask" or quote.status.lower() != "tradeable":
+        raise DataFetchError("quote lacks a valid live price basis/status")
+    if quote.bid is None or quote.ask is None or not math.isfinite(quote.bid) or not math.isfinite(quote.ask):
+        raise DataFetchError("quote has invalid bid/ask values")
+    if quote.bid <= 0 or quote.ask < quote.bid:
+        raise DataFetchError("quote has invalid bid/ask values")
 
 
 def _resample(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
@@ -310,17 +375,8 @@ def _validate(df: pd.DataFrame, request: OHLCVRequest) -> pd.DataFrame:
     return df
 
 
-_MAX_BAR_AGE = {
-    "15m": timedelta(minutes=25),
-    "30m": timedelta(minutes=45),
-    "1h": timedelta(hours=1, minutes=15),
-    "4h": timedelta(hours=4, minutes=15),
-    "1d": timedelta(hours=30),
-}
-
-
 def _ensure_fresh(df: pd.DataFrame, request: OHLCVRequest, now: datetime | None = None) -> None:
-    """Reject stale/future live bars before they can drive recommendations."""
+    """Reject stale/future completed bars before they can drive recommendations."""
     if request.timeframe not in _MAX_BAR_AGE:
         raise DataFetchError(f"no freshness policy for timeframe {request.timeframe!r}")
     latest = pd.Timestamp(df.index[-1])
@@ -329,7 +385,9 @@ def _ensure_fresh(df: pd.DataFrame, request: OHLCVRequest, now: datetime | None 
     else:
         latest = latest.tz_convert("UTC")
     current = now or datetime.now(timezone.utc)
-    age = current - latest.to_pydatetime()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    age = current.astimezone(timezone.utc) - latest.to_pydatetime()
     if age < timedelta(minutes=-5):
         raise DataFetchError(f"latest bar is in the future for {request.symbol}/{request.timeframe}")
     if age > _MAX_BAR_AGE[request.timeframe]:
@@ -337,9 +395,9 @@ def _ensure_fresh(df: pd.DataFrame, request: OHLCVRequest, now: datetime | None 
 
 
 def fetch_ohlcv_yfinance(
-    request: OHLCVRequest, max_retries: int = 3, backoff_seconds: float = 2.0
+    request: OHLCVRequest, max_retries: int = 3, backoff_seconds: float = 2.0,
 ) -> pd.DataFrame | None:
-    """Fetch OHLCV bars for `symbol` at `timeframe`. Returns None on failure."""
+    """Fetch OHLCV bars for ``symbol`` at ``timeframe`` from Yahoo."""
     import yfinance as yf  # imported lazily so tests can run without the dependency installed
 
     base_interval = _BASE_INTERVAL.get(request.timeframe)
@@ -347,17 +405,12 @@ def fetch_ohlcv_yfinance(
     if base_interval is None or period is None:
         logger.error("unsupported timeframe %r", request.timeframe)
         return None
-
     last_error: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
             df = yf.download(
-                tickers=request.symbol,
-                period=period,
-                interval=base_interval,
-                progress=False,
-                auto_adjust=False,
-                multi_level_index=False,
+                tickers=request.symbol, period=period, interval=base_interval,
+                progress=False, auto_adjust=False, multi_level_index=False,
             )
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
@@ -372,28 +425,34 @@ def fetch_ohlcv_yfinance(
             wait = backoff_seconds * (2 ** (attempt - 1))
             logger.warning(
                 "yfinance fetch failed for %s (%s), attempt %d/%d, retrying in %.1fs: %s",
-                request.symbol, request.timeframe, attempt, max_retries, wait, exc,
+                request.symbol, type(exc).__name__, attempt, max_retries, wait, exc,
             )
             if attempt < max_retries:
                 time.sleep(wait)
-
-    logger.error(
-        "yfinance fetch permanently failed for %s/%s after %d attempts: %s",
-        request.symbol, request.timeframe, max_retries, last_error,
-    )
+    logger.error("yfinance fetch permanently failed for %s/%s after %d attempts: %s",
+                 request.symbol, request.timeframe, max_retries, last_error)
     return None
 
 
 def fetch_ohlcv(request: OHLCVRequest) -> pd.DataFrame | None:
-    """Public entry point Scanner 1 should call. Wraps provider selection +
-    error containment so a bad symbol never raises out of a scan loop."""
+    """Public entry point; provider failures skip only the affected scan request."""
     try:
         from config import get_settings
 
         settings = get_settings()
         provider = str(settings.data_provider).strip().lower()
-        if provider == "oanda":
-            frame = fetch_ohlcv_oanda(request, settings)
+        if provider == "twelvedata":
+            cache_key = (normalize_twelvedata_symbol(request.symbol), request.timeframe, request.min_bars)
+            with _OHLCV_CACHE_LOCK:
+                cached = _OHLCV_CACHE.get(cache_key)
+                if cached and time.monotonic() - cached[0] <= _OHLCV_CACHE_SECONDS:
+                    frame = cached[1].copy()
+                    frame.attrs.update(cached[1].attrs)
+                    return frame
+            frame = fetch_ohlcv_twelvedata(request, settings)
+            frame.attrs["provider"] = "twelvedata"
+            with _OHLCV_CACHE_LOCK:
+                _OHLCV_CACHE[cache_key] = (time.monotonic(), frame.copy())
         elif provider == "yfinance":
             frame = fetch_ohlcv_yfinance(request)
         else:
@@ -407,43 +466,32 @@ def fetch_ohlcv(request: OHLCVRequest) -> pd.DataFrame | None:
         logger.warning("data validation failed for %s/%s: %s", request.symbol, request.timeframe, exc)
         return None
     except Exception as exc:
-        # Includes a missing optional SDK or unexpected provider failure; one
-        # dependency problem must never escape into the watchlist scan loop.
-        logger.warning("OHLCV fetch unavailable for %s/%s (%s)", request.symbol, request.timeframe, type(exc).__name__)
+        logger.warning("OHLCV fetch unavailable for %s/%s (%s)",
+                       request.symbol, request.timeframe, type(exc).__name__)
         return None
 
 
 def fetch_tv_confirmation(symbol: str, timeframe: str) -> dict | None:
-    """Optional cross-check using TradingView's own server-side indicators.
-
-    Returns a flat dict of indicator name -> value (e.g. "ADX", "RSI",
-    "EMA20") or None if the symbol/exchange pairing can't be resolved or the
-    request fails. Never used as the sole source of truth; the selected OHLCV
-    provider remains authoritative for regime/strategy math.
-    """
+    """Optional TradingView indicator cross-check, never a price-data source."""
     try:
         from tradingview_ta import TA_Handler, Interval
 
         interval_map = {
-            "15m": Interval.INTERVAL_15_MINUTES,
-            "30m": Interval.INTERVAL_30_MINUTES,
-            "1h": Interval.INTERVAL_1_HOUR,
-            "4h": Interval.INTERVAL_4_HOURS,
+            "15m": Interval.INTERVAL_15_MINUTES, "30m": Interval.INTERVAL_30_MINUTES,
+            "1h": Interval.INTERVAL_1_HOUR, "4h": Interval.INTERVAL_4_HOURS,
             "1d": Interval.INTERVAL_1_DAY,
         }
         tv_interval = interval_map.get(timeframe)
         if tv_interval is None:
             logger.warning("no tradingview_ta interval mapping for %r", timeframe)
             return None
-
         handler = TA_Handler(
-            symbol=symbol.replace("=X", "").upper(),
-            exchange="FX_IDC",
-            screener="forex",
-            interval=tv_interval,
+            symbol=symbol.replace("=X", "").upper(), exchange="FX_IDC",
+            screener="forex", interval=tv_interval,
         )
         analysis = handler.get_analysis()
         return dict(analysis.indicators)
     except Exception as exc:
-        logger.info("tradingview_ta confirmation unavailable for %s/%s: %s", symbol, timeframe, exc)
+        logger.info("tradingview_ta confirmation unavailable for %s/%s: %s",
+                    symbol, timeframe, exc)
         return None

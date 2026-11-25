@@ -146,7 +146,7 @@ def create_signal_chart(signal: TradeSignal, frame: pd.DataFrame, signal_id: str
     direction = "BUY" if signal.direction == TradeDirection.BUY else "SELL"
     provider = str(frame.attrs.get("provider", "")).strip().lower()
     source_label = {
-        "oanda": "OANDA v20 midpoint OHLCV",
+        "twelvedata": "Twelve Data aggregated OHLCV (midpoint; no bid/ask)",
         "yfinance": "Yahoo Finance OHLCV (historical/delayed; not live)",
     }.get(provider, "Unverified OHLCV source (metadata unavailable)")
     if signal.symbol.upper() == "XAUUSD" and provider == "yfinance":

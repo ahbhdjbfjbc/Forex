@@ -36,12 +36,12 @@ def safe_settings(monkeypatch):
         account_size_usd=10_000.0,
         risk_percent_per_trade=1.0,
         min_risk_reward=2.0,
-        data_provider="oanda",
-        oanda_quote_max_age_seconds=30,
+        data_provider="twelvedata",
+        twelvedata_quote_max_age_seconds=30,
     )
     monkeypatch.setattr(bridge, "get_settings", lambda: settings)
     monkeypatch.setattr(
-        "src.data_provider.get_oanda_live_quote",
+        "src.data_provider.get_live_quote",
         lambda symbol, *_args, **_kwargs: LiveQuote(
             "EUR_USD" if "EUR" in symbol else "XAU_USD",
             1.0849 if "EUR" in symbol else 4299.9,
@@ -98,7 +98,7 @@ def test_explicit_stop_and_targets_use_pip_based_lot_size():
     assert signal.risk.pip_value_per_lot > 0
 
 
-def test_pine_levels_are_rebased_to_fresh_oanda_ask_without_default_levels(monkeypatch):
+def test_pine_levels_are_rebased_to_fresh_twelvedata_midpoint_without_default_levels(monkeypatch):
     from datetime import datetime, timezone
 
     from src.data_provider import LiveQuote
@@ -110,20 +110,23 @@ def test_pine_levels_are_rebased_to_fresh_oanda_ask_without_default_levels(monke
         secret="test-secret-which-is-longer-than-32-chars",
     )
     signal = make_signal(entry=1.0850)
-    quote = LiveQuote("EUR_USD", 1.0853, 1.0855, datetime.now(timezone.utc), "tradeable")
-    monkeypatch.setattr("src.data_provider.get_oanda_live_quote", lambda *_a, **_k: quote)
+    quote = LiveQuote(
+        "EUR/USD", None, None, datetime.now(timezone.utc), "midpoint",
+        price_basis="midpoint", midpoint=1.0854,
+    )
+    monkeypatch.setattr("src.data_provider.get_live_quote", lambda *_a, **_k: quote)
 
     adjusted = bridge._apply_tradingview_levels(signal, alert, bridge.get_settings())
 
-    assert adjusted.entry_price == pytest.approx(1.0855)
-    assert adjusted.stop_loss_price == pytest.approx(1.0835)
-    assert adjusted.take_profit_1_price == pytest.approx(1.0895)
-    assert adjusted.take_profit_2_price == pytest.approx(1.0915)
+    assert adjusted.entry_price == pytest.approx(1.0854)
+    assert adjusted.stop_loss_price == pytest.approx(1.0834)
+    assert adjusted.take_profit_1_price == pytest.approx(1.0894)
+    assert adjusted.take_profit_2_price == pytest.approx(1.0914)
     assert adjusted.take_profit_1_rr == pytest.approx(2.0)
     assert adjusted.take_profit_2_rr == pytest.approx(3.0)
 
 
-def test_pine_sell_levels_are_rebased_to_fresh_oanda_bid(monkeypatch):
+def test_pine_sell_levels_are_rebased_to_fresh_twelvedata_midpoint(monkeypatch):
     from datetime import datetime, timezone
 
     from src.data_provider import LiveQuote
@@ -136,15 +139,18 @@ def test_pine_sell_levels_are_rebased_to_fresh_oanda_bid(monkeypatch):
         secret="test-secret-which-is-longer-than-32-chars",
     )
     signal = make_signal(entry=1.0850, direction=TradeDirection.SELL)
-    quote = LiveQuote("EUR_USD", 1.0845, 1.0847, datetime.now(timezone.utc), "tradeable")
-    monkeypatch.setattr("src.data_provider.get_oanda_live_quote", lambda *_a, **_k: quote)
+    quote = LiveQuote(
+        "EUR/USD", None, None, datetime.now(timezone.utc), "midpoint",
+        price_basis="midpoint", midpoint=1.0846,
+    )
+    monkeypatch.setattr("src.data_provider.get_live_quote", lambda *_a, **_k: quote)
 
     adjusted = bridge._apply_tradingview_levels(signal, alert, bridge.get_settings())
 
-    assert adjusted.entry_price == pytest.approx(1.0845)
-    assert adjusted.stop_loss_price == pytest.approx(1.0865)
-    assert adjusted.take_profit_1_price == pytest.approx(1.0805)
-    assert adjusted.take_profit_2_price == pytest.approx(1.0785)
+    assert adjusted.entry_price == pytest.approx(1.0846)
+    assert adjusted.stop_loss_price == pytest.approx(1.0866)
+    assert adjusted.take_profit_1_price == pytest.approx(1.0806)
+    assert adjusted.take_profit_2_price == pytest.approx(1.0786)
     assert adjusted.take_profit_1_rr == pytest.approx(2.0)
     assert adjusted.take_profit_2_rr == pytest.approx(3.0)
 
@@ -287,7 +293,7 @@ def test_webhook_suppresses_active_recommendation_and_reports_tp2_once(monkeypat
     messages = []
     live = {"entry": 1.085}
     monkeypatch.setattr(
-        "src.data_provider.get_oanda_live_quote",
+        "src.data_provider.get_live_quote",
         lambda *_args, **_kwargs: LiveQuote(
             "EUR_USD", live["entry"] - 0.0001, live["entry"],
             datetime.now(timezone.utc), "tradeable",

@@ -1,8 +1,8 @@
 """Pip math, lot sizing, and risk/reward calculations.
 
 Historical/offline callers may use an explicitly documented approximation for
-non-USD quote currencies. Live repricing fetches an independent, fresh OANDA
-conversion quote for every cross pair and fails closed if it is unavailable.
+non-USD quote currencies. Live repricing uses a fresh Twelve Data midpoint;
+that feed has no bid/ask and is not an executable fill price.
 """
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ def calculate_unit_size(
 
 
 def _live_quote_to_usd_rate(symbol: str, settings) -> float:
-    """Convert one unit of the FX quote currency to USD at a fresh OANDA rate."""
+    """Convert one unit of the FX quote currency to USD at a fresh market rate."""
     normalized = str(symbol).upper().replace("=X", "").replace("/", "")
     quote_currency = normalized[-3:]
     if quote_currency == "USD":
@@ -134,24 +134,25 @@ def _live_quote_to_usd_rate(symbol: str, settings) -> float:
     if len(normalized) != 6 or not normalized.isalpha():
         raise ValueError("cannot determine quote currency for live lot sizing")
 
-    from src.data_provider import ensure_live_quote_fresh, get_oanda_live_quote
+    from src.data_provider import ensure_live_quote_fresh, get_live_quote
 
     try:
-        direct = get_oanda_live_quote(f"{quote_currency}USD", settings)
+        direct = get_live_quote(f"{quote_currency}USD", settings)
         ensure_live_quote_fresh(
-            direct, int(getattr(settings, "oanda_quote_max_age_seconds", 30))
+            direct, int(getattr(settings, "twelvedata_quote_max_age_seconds", 90))
         )
-        return float(direct.bid)
+        return float(direct.mid if direct.price_basis == "midpoint" else direct.bid)
     except Exception:
         try:
-            inverse = get_oanda_live_quote(f"USD{quote_currency}", settings)
+            inverse = get_live_quote(f"USD{quote_currency}", settings)
             ensure_live_quote_fresh(
-                inverse, int(getattr(settings, "oanda_quote_max_age_seconds", 30))
+                inverse, int(getattr(settings, "twelvedata_quote_max_age_seconds", 90))
             )
-            return 1.0 / float(inverse.ask)
+            inverse_rate = inverse.mid if inverse.price_basis == "midpoint" else inverse.ask
+            return 1.0 / float(inverse_rate)
         except Exception as inverse_error:
             raise ValueError(
-                f"fresh OANDA conversion unavailable for {quote_currency}/USD"
+                f"fresh market conversion unavailable for {quote_currency}/USD"
             ) from inverse_error
 
 
@@ -169,7 +170,13 @@ def reprice_signal_to_quote(signal, quote, settings, max_entry_drift_r: float = 
         raise ValueError("signal has invalid entry or stop distance")
 
     direction = signal.direction
-    new_entry = float(quote.ask if direction == TradeDirection.BUY else quote.bid)
+    if quote.price_basis == "midpoint":
+        new_entry = float(quote.mid)
+    else:
+        side_price = quote.ask if direction == TradeDirection.BUY else quote.bid
+        if side_price is None:
+            raise ValueError("live quote has no price for the requested trade side")
+        new_entry = float(side_price)
     delta = new_entry - old_entry
     if abs(delta) > old_risk_distance * max_entry_drift_r:
         raise ValueError("live quote moved more than the allowed fraction of initial risk")
@@ -183,7 +190,8 @@ def reprice_signal_to_quote(signal, quote, settings, max_entry_drift_r: float = 
         valid = new_tp2 < new_tp1 < new_entry < new_stop
     if not valid:
         raise ValueError("rebased stop/target levels are not on the correct side of entry")
-    if abs(new_entry - new_stop) <= float(quote.spread) * 2:
+    spread = quote.spread or 0.0
+    if abs(new_entry - new_stop) <= float(spread) * 2:
         raise ValueError("planned stop distance is too small relative to live spread")
 
     symbol = signal.symbol

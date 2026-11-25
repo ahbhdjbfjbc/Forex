@@ -56,27 +56,29 @@ python strategy_evolver.py --apply <proposal_id>   # only works if that proposal
 See [Railway deployment notes](RAILWAY_DEPLOYMENT_AR.md) for hosted deployment,
 environment variables, persistent storage, and health-check settings.
 
-> **Live-data requirement:** `DATA_PROVIDER=oanda` selects the implemented
-> OANDA v20 adapter. It uses completed midpoint candles for analysis and a
-> timestamped account Bid/Ask quote for current entry pricing. The gate blocks
-> publication if OANDA credentials are absent, the quote is stale/non-tradeable,
-> or OANDA is unavailable; it never falls back to Yahoo. Set `OANDA_API_TOKEN`,
-> `OANDA_ACCOUNT_ID`, and `OANDA_ENVIRONMENT` in the deployment secret store.
-> The market-data environment defaults to `live` (read-only); it must match the
-> account/token. Order execution is separate, disabled by default, and Practice-only.
-> Local mocked tests do not prove a live account connection, production
-> deployment, profitability, or broker fills. Outcome tracking is still an
-> OHLCV-based estimate, not realized account P&L.
+> **Market-data requirement:** `DATA_PROVIDER=twelvedata` selects the Twelve Data
+> adapter. Set `TWELVEDATA_API_KEY` in the deployment secret store. The adapter
+> converts FX/metals symbols to Twelve Data format and requests completed UTC
+> OHLCV bars. Twelve Data's documented quote contract supplies a timestamped
+> midpoint, not Bid/Ask; entries are therefore midpoint references, not broker
+> quotes or guaranteed fills. The gate blocks publication when data are missing,
+> stale, market-closed, or rate-limited and never falls back to Yahoo. The
+> adapter paces calls below the Basic plan's published limits and uses a local
+> 700-credit/day safety cap. Confirm current entitlements on the Twelve Data
+> account dashboard. Paper execution remains separate, disabled by default,
+> and Practice-only. Local mocked tests do not prove a live API connection,
+> production deployment, profitability, or broker fills. Outcome tracking is
+> still an OHLCV-based estimate, not realized account P&L.
 
-After configuring the OANDA secrets on the host, verify a live account quote
-with `GET /health/market?symbol=EURUSD` and the `X-Webhook-Secret` header. The
-endpoint returns the timestamped Bid/Ask only for a fresh, tradeable quote; it
-is protected by the webhook shared secret and never submits an order. Plain
+After configuring `TWELVEDATA_API_KEY` on the host, verify the market feed with
+`GET /health/market?symbol=EURUSD` and the `X-Webhook-Secret` header. The
+protected response returns `price`, `price_basis=midpoint`, the observation
+timestamp, and quote age; it intentionally does not emit bid/ask fields. Plain
 `GET /health` checks HTTP readiness only.
 
 ## What each piece does
 
-- **`src/scanner_1_regime.py`** — pulls completed midpoint OHLCV from the configured provider (OANDA by default, resampled to
+- **`src/scanner_1_regime.py`** — pulls completed OHLCV from the configured provider (Twelve Data by default, resampled to
   4H/1H/15M as needed) for every symbol in `WATCHLIST`, computes ADX, EMA
   20/50/200 alignment, swing structure, ATR expansion, Bollinger bandwidth,
   RVOL, and active FX session, then classifies each (symbol, timeframe) pair
@@ -93,8 +95,9 @@ is protected by the webhook shared secret and never submits an order. Plain
   `POST /webhook/tradingview` for externally-triggered Pine Script alerts
   (see `pine_script/tv_indicator.pine`). Validates the JSON schema and a
   shared secret, requires Pine's explicit stop-loss and two targets, confirms
-  direction/price with a fresh internal OANDA scan, rebases those levels to a
-  current OANDA Bid/Ask quote, and forwards the validated signal to the notifier.
+  direction/price with fresh internal Twelve Data OHLCV and midpoint data,
+  rebases those levels to the provider midpoint, and forwards the validated
+  signal to the notifier. The feed does not provide broker Bid/Ask pricing.
 
 - **`src/notifier.py`** — formats and sends the trade alert to Telegram,
   including a chart and caption in one Telegram `sendPhoto` request. The PNG
@@ -114,8 +117,8 @@ is protected by the webhook shared secret and never submits an order. Plain
   This applies in private chats and groups; group commands additionally require
   `TELEGRAM_CHAT_ID` to match that group. A chat ID or username alone never
   authorizes an admin action. `src/symbol_resolver.py` handles the free-text -> ticker mapping
-  (including mapping gold/silver to OANDA `XAU_USD`/`XAG_USD`; availability
-  depends on the instruments enabled for the account).
+  (including mapping gold/silver to canonical `XAUUSD`/`XAGUSD`; the Twelve Data
+  adapter sends `XAU/USD` and `XAG/USD`).
 
 - **`src/watchlist_store.py`** — the dynamic watchlist the hourly scheduler
   scans: seeded with `EURUSD, GBPUSD, XAUUSD, USDJPY`, grown by `/add` and

@@ -377,7 +377,7 @@ def client(monkeypatch) -> TestClient:
         ),
     )
     monkeypatch.setattr(
-        "src.data_provider.get_oanda_live_quote",
+        "src.data_provider.get_live_quote",
         lambda symbol, *_args, **_kwargs: LiveQuote(
             "EUR_USD", 1.0850, 1.0852, datetime.now(timezone.utc), "tradeable"
         ),

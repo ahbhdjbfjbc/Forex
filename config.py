@@ -30,13 +30,11 @@ class Settings(BaseSettings):
     atr_expansion_multiplier: float = 1.5
     bb_squeeze_percentile: float = 20.0
 
-    # OANDA market data is read-only and defaults to the live pricing endpoint.
-    # Order execution remains separate, opt-in, and hard-locked to Practice.
-    data_provider: str = "oanda"
-    oanda_api_token: str = ""
-    oanda_account_id: str = ""
-    oanda_environment: str = "live"
-    oanda_quote_max_age_seconds: int = 30
+    # Twelve Data supplies aggregated OHLCV and a timestamped midpoint, not bid/ask.
+    # Paper order execution is a separate opt-in Practice-only integration below.
+    data_provider: str = "twelvedata"
+    twelvedata_api_key: str = ""
+    twelvedata_quote_max_age_seconds: int = 90
     scan_interval_seconds: int = 300
 
     # 1-hour auto-scan scheduler (main.py): scans src.watchlist_store's
@@ -134,19 +132,11 @@ class Settings(BaseSettings):
             raise ValueError("scan intervals must be greater than zero")
         return v
 
-    @field_validator("oanda_environment")
+    @field_validator("twelvedata_quote_max_age_seconds")
     @classmethod
-    def _valid_oanda_environment(cls, v: str) -> str:
-        value = v.strip().lower()
-        if value not in {"practice", "live"}:
-            raise ValueError("oanda_environment must be 'practice' or 'live'")
-        return value
-
-    @field_validator("oanda_quote_max_age_seconds")
-    @classmethod
-    def _valid_oanda_quote_age(cls, v: int) -> int:
-        if not 1 <= v <= 120:
-            raise ValueError("oanda_quote_max_age_seconds must be between 1 and 120")
+    def _valid_twelvedata_quote_age(cls, v: int) -> int:
+        if not 1 <= v <= 180:
+            raise ValueError("twelvedata_quote_max_age_seconds must be between 1 and 180")
         return v
 
     @field_validator("ai_report_interval_hours")

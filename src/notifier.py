@@ -462,21 +462,21 @@ def send_alert(
     from src.publish_gate import check_publish_allowed
 
     live_quote = None
-    if str(getattr(settings, "data_provider", "yfinance") or "").strip().lower() == "oanda":
+    if str(getattr(settings, "data_provider", "yfinance") or "").strip().lower() == "twelvedata":
         try:
-            from src.data_provider import ensure_live_quote_fresh, get_oanda_live_quote
+            from src.data_provider import ensure_live_quote_fresh, get_live_quote
             from src import risk
 
-            live_quote = get_oanda_live_quote(signal.symbol, settings)
+            live_quote = get_live_quote(signal.symbol, settings)
             ensure_live_quote_fresh(
                 live_quote,
-                int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
+                int(getattr(settings, "twelvedata_quote_max_age_seconds", 90)),
             )
             signal = risk.reprice_signal_to_quote(signal, live_quote, settings)
         except Exception as exc:
-            logger.warning("refusing to publish without a fresh OANDA quote (%s)", type(exc).__name__)
+            logger.warning("refusing to publish without a fresh Twelve Data midpoint (%s)", type(exc).__name__)
             blocked = DeliveryResult(telegram=False, discord=False, desktop=False, duplicate=False)
-            blocked.blocked_reason = "تعذر جلب سعر OANDA حي أو تحرك السعر بعيداً عن نقطة الدخول؛ لم تُرسل التوصية."
+            blocked.blocked_reason = "تعذر جلب سعر Twelve Data حديث أو تحرك السعر بعيداً عن نقطة الدخول؛ لم تُرسل التوصية."
             return blocked
 
     decision = check_publish_allowed(signal, settings, live_quote=live_quote)

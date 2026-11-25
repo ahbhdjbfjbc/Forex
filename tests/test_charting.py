@@ -43,7 +43,7 @@ def _signal():
 def test_chart_assets_are_built_from_saved_source_frame_and_match_signal(tmp_path, monkeypatch):
     monkeypatch.setattr(charting, "get_data_dir", lambda: tmp_path)
     frame = _frame()
-    frame.attrs["provider"] = "oanda"
+    frame.attrs["provider"] = "twelvedata"
     signal = _signal()
     assets = charting.create_signal_chart(signal, frame, "signal-123")
 
@@ -51,7 +51,7 @@ def test_chart_assets_are_built_from_saved_source_frame_and_match_signal(tmp_pat
     assert assets.image_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     source = json.loads(assets.source_path.read_text(encoding="utf-8"))
     assert source["signal_id"] == "signal-123"
-    assert source["source"] == "OANDA v20 midpoint OHLCV"
+    assert source["source"] == "Twelve Data aggregated OHLCV (midpoint; no bid/ask)"
     assert source["levels"]["entry"] == signal.entry_price
     assert source["levels"]["stop_loss"] == signal.stop_loss_price
     assert source["levels"]["take_profit_1"] == signal.take_profit_1_price

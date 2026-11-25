@@ -244,8 +244,8 @@ def _strategy_for_alert(strategy_name: str | None) -> StrategyType:
 def _corroborate_alert(alert: TradingViewAlert):
     """Require a fresh internal scan to confirm direction and approximate price."""
     settings = get_settings()
-    if str(getattr(settings, "data_provider", "") or "").strip().lower() != "oanda":
-        raise MarketDataUnavailable("TradingView alerts require DATA_PROVIDER=oanda")
+    if str(getattr(settings, "data_provider", "") or "").strip().lower() != "twelvedata":
+        raise MarketDataUnavailable("TradingView alerts require DATA_PROVIDER=twelvedata")
     raw_symbol = alert.ticker.upper().replace("=X", "").replace("=F", "")
     symbol = sanitize_symbol(raw_symbol)
     if symbol is None:
@@ -263,23 +263,23 @@ def _corroborate_alert(alert: TradingViewAlert):
         raise MarketDataUnavailable(f"empty OHLCV data for {symbol}/{alert.timeframe}")
 
     try:
-        from src.data_provider import ensure_live_quote_fresh, get_oanda_live_quote
+        from src.data_provider import ensure_live_quote_fresh, get_live_quote
 
-        quote = get_oanda_live_quote(symbol, settings)
+        quote = get_live_quote(symbol, settings)
         ensure_live_quote_fresh(
             quote,
-            int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
+            int(getattr(settings, "twelvedata_quote_max_age_seconds", 90)),
         )
     except Exception as exc:
-        raise MarketDataUnavailable(f"fresh OANDA quote unavailable for {symbol}") from exc
+        raise MarketDataUnavailable(f"fresh Twelve Data midpoint unavailable for {symbol}") from exc
 
     market_price = quote.mid
     atr = float(regime_result.metrics.atr)
     if not math.isfinite(atr) or atr <= 0:
         raise MarketDataUnavailable(f"invalid ATR for {symbol}/{alert.timeframe}")
-    tolerance = max(quote.spread * 3.0, abs(market_price) * 0.0001, atr * 0.20)
+    tolerance = max((quote.spread or 0.0) * 3.0, abs(market_price) * 0.0001, atr * 0.20)
     if not math.isfinite(market_price) or abs(alert.price - market_price) > tolerance:
-        raise AlertNotCorroborated("TradingView price does not match the fresh OANDA bid/ask market")
+        raise AlertNotCorroborated("TradingView price does not match the fresh Twelve Data midpoint")
 
     if alert.signal == "NONE":
         return None, regime_result, frame
@@ -291,20 +291,25 @@ def _corroborate_alert(alert: TradingViewAlert):
 
 
 def _apply_tradingview_levels(signal: TradeSignal, alert: TradingViewAlert, settings) -> TradeSignal:
-    """Use validated Pine levels after shifting them to the OANDA side quote."""
-    from src.data_provider import ensure_live_quote_fresh, get_oanda_live_quote
+    """Use validated Pine levels after shifting them to the fresh market price."""
+    from src.data_provider import ensure_live_quote_fresh, get_live_quote
 
-    quote = get_oanda_live_quote(alert.ticker, settings)
+    quote = get_live_quote(alert.ticker, settings)
     ensure_live_quote_fresh(
         quote,
-        int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
+        int(getattr(settings, "twelvedata_quote_max_age_seconds", 90)),
     )
-    entry = quote.ask if signal.direction == TradeDirection.BUY else quote.bid
+    if quote.price_basis == "midpoint":
+        entry = quote.mid
+    else:
+        entry = quote.ask if signal.direction == TradeDirection.BUY else quote.bid
+    if entry is None:
+        raise ValueError("Twelve Data quote has no current price")
     planned_risk = abs(float(alert.price) - float(alert.stop_loss))
     if not math.isfinite(planned_risk) or planned_risk <= 0:
         raise ValueError("TradingView alert has no valid initial risk distance")
     if abs(entry - float(alert.price)) > planned_risk * 0.25:
-        raise ValueError("OANDA quote moved more than 0.25R from the original TradingView entry")
+        raise ValueError("Twelve Data midpoint moved more than 0.25R from the original TradingView entry")
     shift = entry - alert.price
     adjusted_alert = alert.model_copy(update={
         "price": entry,
@@ -325,7 +330,7 @@ def _apply_tradingview_levels(signal: TradeSignal, alert: TradingViewAlert, sett
         take_profit_2_pips=levels.take_profit_2_pips,
         take_profit_2_rr=levels.take_profit_2_rr,
         risk=levels.risk,
-        rationale=f"{signal.rationale}; tested Pine levels rebased to OANDA {quote.instrument} quote",
+        rationale=f"{signal.rationale}; Pine levels rebased to Twelve Data midpoint {quote.instrument}",
     )
 
 
@@ -475,25 +480,25 @@ def market_health(
     symbol: str = "EURUSD",
     x_webhook_secret: str | None = Header(default=None),
 ):
-    """Secret-protected live OANDA diagnostic; never submits an order."""
+    """Secret-protected Twelve Data market diagnostic; never submits an order."""
     _verify_secret(x_webhook_secret)
     settings = get_settings()
-    if str(getattr(settings, "data_provider", "") or "").strip().lower() != "oanda":
+    if str(getattr(settings, "data_provider", "") or "").strip().lower() != "twelvedata":
         return JSONResponse(
             status_code=503,
-            content={"status": "unavailable", "reason": "DATA_PROVIDER is not oanda"},
+            content={"status": "unavailable", "reason": "DATA_PROVIDER is not twelvedata"},
         )
     try:
         from src.data_provider import (
             DataFetchError,
             ensure_live_quote_fresh,
-            get_oanda_live_quote,
+            get_live_quote,
         )
 
-        quote = get_oanda_live_quote(symbol, settings, use_cache=False)
+        quote = get_live_quote(symbol, settings, use_cache=False)
         ensure_live_quote_fresh(
             quote,
-            int(getattr(settings, "oanda_quote_max_age_seconds", 30)),
+            int(getattr(settings, "twelvedata_quote_max_age_seconds", 90)),
         )
     except (DataFetchError, TypeError, ValueError) as exc:
         return JSONResponse(
@@ -501,7 +506,7 @@ def market_health(
             content={
                 "status": "unavailable",
                 "reason": str(exc)[:200],
-                "provider": "oanda",
+                "provider": "twelvedata",
             },
         )
     age_seconds = max(
@@ -510,10 +515,10 @@ def market_health(
     )
     return {
         "status": "ok",
-        "provider": "oanda",
+        "provider": "twelvedata",
         "instrument": quote.instrument,
-        "bid": quote.bid,
-        "ask": quote.ask,
+        "price": quote.mid,
+        "price_basis": quote.price_basis,
         "observed_at": quote.observed_at.isoformat(),
         "age_seconds": round(age_seconds, 3),
         "trade_status": quote.status,
@@ -603,9 +608,9 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
     flush_pending_signal_outcomes()
     try:
         # The scanner must independently confirm the signal direction and
-        # current price from fresh OANDA-backed OHLCV/quote data. Explicit Pine
+        # current price from fresh Twelve Data OHLCV/midpoint data. Explicit Pine
         # stop/target levels are applied only after that corroboration and are
-        # rebased to the current side-specific OANDA quote below.
+        # rebased to the provider midpoint below.
         signal, _regime_result, frame = await asyncio.to_thread(_corroborate_alert, alert)
     except AlertNotCorroborated:
         _RECENT_ALERTS.append(alert.model_copy(update={"secret": None}))
@@ -660,7 +665,7 @@ async def tradingview_webhook(request: Request) -> WebhookAck:
             status_code=503,
             content=WebhookAck(
                 status="live_quote_unavailable",
-                detail="fresh OANDA quote or validated TradingView levels unavailable; no recommendation was published",
+                detail="fresh Twelve Data midpoint or validated TradingView levels unavailable; no recommendation was published",
             ).model_dump(),
         )
 

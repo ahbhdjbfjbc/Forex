@@ -1,6 +1,6 @@
 # تجهيز النشر على Railway
 
-هذا الدليل يجهز التطبيق للعمل كخدمة Python واحدة مستمرة. يستخدم موصل بيانات OANDA v20 للشموع المكتملة وعروض Bid/Ask الحالية؛ تبقى التوصيات محجوبة حتى تكون إعدادات OANDA صحيحة وتصل quote حديثة قابلة للتداول.
+هذا الدليل يجهز التطبيق للعمل كخدمة Python واحدة مستمرة. يستخدم موصل Twelve Data لشموع OHLCV وأسعار midpoint المؤرخة؛ لا يوفّر عقد السعر الموثق Bid/Ask، لذلك لا تمثل مستويات الدخول سعر تنفيذ من وسيط.
 
 ## إعداد الخدمة
 
@@ -24,20 +24,14 @@
 - `TELEGRAM_CHAT_ID`: معرّف مجموعة التحكم عند تشغيل الأوامر داخل مجموعة. لا يُستخدم كوجهة لإشارات التداول. ردود الأوامر نفسها تبقى في المحادثة التي أُرسل منها الأمر.
 - `WEBHOOK_SHARED_SECRET`: استخدم قيمة عشوائية فريدة بطول 32 محرفاً على الأقل عند استقبال تنبيهات TradingView. لا تستخدم القيمة الافتراضية أو أمثلة `.env.example`.
 - `TELEGRAM_ALLOWED_USER_ID`: مطلوب لكل أوامر البوت، في المحادثة الخاصة والمجموعات؛ ضع المعرّف الرقمي لحساب المالك المسموح فقط. عند استخدام مجموعة، اضبط `TELEGRAM_CHAT_ID` أيضاً على معرّف المجموعة، إذ يلزم تطابق المستخدم والمحادثة معاً.
-- `DATA_PROVIDER=oanda`: اختر موصل أسعار OANDA. احذف/غيّر أي قيمة قديمة مثل `yfinance` لأن Yahoo لا يجتاز بوابة النشر اللحظي.
-- `OANDA_ENVIRONMENT=live`: يختار واجهة الأسعار الحية read-only؛ غيّره صراحةً إلى `practice` فقط إذا كان التوكن ورقم الحساب لحساب Practice. هذا المتغير لا يرسل أوامر. التنفيذ التجريبي منفصل، معطّل افتراضياً، ومقيّد بـ`PAPER_TRADING_ENV=practice`.
-- `OANDA_API_TOKEN`: رمز Personal Access Token الخاص بـOANDA. اعتبره كلمة مرور؛ لا تحفظه في Git أو Telegram أو الكود، وخزّنه في Railway Variables فقط. توضح OANDA أن الرمز الشخصي يتيح الوصول إلى الحسابات الفرعية المرتبطة.
-- `OANDA_ACCOUNT_ID`: معرف الحساب المرتبط بالرمز، ويستخدم لجلب السعر الحالي؛ لا تخلطه مع `PAPER_ACCOUNT_ID`.
-- `OANDA_QUOTE_MAX_AGE_SECONDS=30`: أقصى عمر لعرض السعر الحالي. السعر القديم أو الأصل غير القابل للتداول يمنع النشر.
+- `DATA_PROVIDER=twelvedata`: اختر موصل Twelve Data؛ Yahoo Finance يبقى متاحاً لتحليل تاريخي فقط ولا يجتاز بوابة نشر التوصيات.
+- `TWELVEDATA_API_KEY`: مفتاح API من Twelve Data. خزّنه في Railway Variables فقط؛ لا تضعه في Git أو Telegram أو كود المشروع.
+- `TWELVEDATA_QUOTE_MAX_AGE_SECONDS=90`: أقصى عمر مسموح لسعر midpoint. السعر القديم أو استجابة سوق مغلق يمنع نشر التوصية.
+- باقة Basic موثّق لها حد 8 اعتمادات في الدقيقة و800 في اليوم؛ يقيّد المحول نفسه إلى 7 طلبات/اعتمادات في الدقيقة و700 في اليوم لإبقاء هامش. يطبّق القيد داخل عملية واحدة فقط، لذلك شغّل replica واحدة وراجع حدود حسابك مباشرةً قبل التشغيل.
+- تسعير Twelve Data الموثق لزوج الفوركس هو midpoint مجمّع، وتحديثه يقارب الدقيقة. لا يرسل المحول Bid/Ask اصطناعياً، ولا يضيف السبريد أو الانزلاق؛ تأكد من ملاءمة شروط استخدام مزود البيانات لنمط العرض المقصود.
 - تنبيهات توقف الأخبار/تعافي التقويم ترسل إلى الأدمن في الخاص مرة واحدة عند كل انتقال للحالة، ولا تنشر في قناة الإشارات. يلزم أن يكون الأدمن قد بدأ محادثة مع البوت كي يستطيع Telegram مراسلته.
 - إعدادات `WATCHLIST` و`TIMEFRAMES` و`RISK_PERCENT_PER_TRADE` و`MIN_SIGNAL_CONFIDENCE` اختيارية ولها قيم افتراضية في المشروع.
-- `ENABLE_PAPER_TRADING` الافتراضي `false`. تكامل OANDA Practice اختياري ومنفصل عن موصل بيانات الأسعار؛ لا يستخدم موصل السوق بيانات هذا المتغير ولا يرسل أوامر.
-
-**إنشاء OANDA Personal Access Token:** افتح [بوابة إدارة حساب OANDA](https://www.oanda.com/account/tpa/personal_token) وسجّل الدخول إلى حساب fxTrade المقصود. من `My Account` ثم `My Services` اختر `Manage API Access`، وافق على اتفاقية API إذا طُلبت، ثم أنشئ Personal Access Token وانسخه مباشرة إلى Secret في Railway. OANDA لا تحتفظ بالتوكن لاستعادته لاحقاً؛ إذا ضاع، ألغِه وأنشئ غيره. هذا التوكن حساس ككلمة المرور ويمنح الوصول إلى الحسابات الفرعية المرتبطة به، لذلك لا ترسله في المحادثة أو Telegram أو GitHub ولا تضعه في رابط URL. راجع [تعليمات المصادقة الرسمية](https://developer.oanda.com/rest-live-v20/authentication/).
-
-**معرّف الحساب والبيئة:** خذ `OANDA_ACCOUNT_ID` من الحساب المرتبط بالتوكن، أو تحقق من الحسابات المصرح بها عبر `GET /v3/accounts` على مضيف البيئة المطابقة، مع إرسال التوكن في رأس `Authorization: Bearer ...` فقط؛ يشرح [مرجع الحسابات الرسمي](https://developer.oanda.com/rest-live-v20/account-ep/) هذا الطلب. استخدم `OANDA_ENVIRONMENT=live` مع توكن/حساب fxTrade Live، أو `practice` مع توكن/حساب fxTrade Practice. لا تخلطهما؛ المضيفان مختلفان بحسب [دليل OANDA للبيئات](https://developer.oanda.com/rest-live-v20/development-guide/). يتطلب REST v20 حساب fxTrade مدعوماً؛ تذكر [صفحة البدء الرسمية](https://developer.oanda.com/rest-live-v20/introduction/) أن API غير متاح لجميع أقسام OANDA، ومنها OANDA Global Markets وOANDA TMS Brokers S.A. إذا لم يظهر خيار `Manage API Access` أو لم يقبل OANDA طلب التوكن، تحقّق من أهلية نوع الحساب وتواصل مع دعم OANDA؛ لا يستطيع التطبيق إنشاء التوكن نيابةً عن صاحب الحساب.
-
-إذا فُقد التوكن أو كُشف، ألغِه من `Manage API Access` وأنشئ آخر، ثم حدّث Railway Variables وأعد النشر. يجب أن يتطابق `OANDA_ENVIRONMENT` مع نوع الحساب والتوكن. إذا لم يدعم الحساب زوجاً أو معدناً، يفشل جلبه بأمان ولا يعود التطبيق إلى Yahoo. الموصل يدعم أزواج العملات والمعادن `XAUUSD` و`XAGUSD` المتاحة في الحساب، ولا يدعم العملات المشفرة.
+- `ENABLE_PAPER_TRADING` الافتراضي `false`. تكامل OANDA Practice اختياري ومنفصل عن موصل بيانات الأسعار؛ يستخدم `PAPER_ACCOUNT_ID` و`PAPER_API_TOKEN` فقط عند تفعيله، ويظل محصوراً ببيئة Practice.
 
 ## حفظ الحالة
 
@@ -46,7 +40,7 @@
 ## التحقق بعد النشر
 
 - افتح عنوان Railway العام مع `/health` وتأكد أن الاستجابة تحتوي `status: ok`.
-- بعد إضافة أسرار OANDA، افحص `GET /health/market?symbol=EURUSD` مع رأس `X-Webhook-Secret` مساوي لـ`WEBHOOK_SHARED_SECRET`. يعرض سعر Bid/Ask وعمر quote إذا كان الاتصال سليماً؛ لا ترسل هذا الرأس إلى سجلات أو قنوات عامة.
+- بعد إضافة `TWELVEDATA_API_KEY`، افحص `GET /health/market?symbol=EURUSD` مع رأس `X-Webhook-Secret` مساوي لـ`WEBHOOK_SHARED_SECRET`. يعرض `price_basis=midpoint` والسعر ووقت الملاحظة والعمر؛ لن يعرض Bid/Ask لأن المزود لا يوفّرهما. لا ترسل هذا الرأس إلى سجلات أو قنوات عامة.
 - راجع سجلات بدء Uvicorn وبدء استطلاع Telegram، وتحقق من commit النشر الفعلي في Railway؛ نجاح CI أو وجود commit على GitHub لا يثبت حدوث نشر Railway.
 - لا ترسل اختباراً إلى قناة حقيقية أثناء هذا التحقق. استخدم محاكي Bot API أو قناة اختبار خاصة بعد مراجعة الوجهة وموافقة مالكها.
 - افحص دورة مسح واحدة في السجلات؛ فنجاح الخدمة أو اختبارات الوحدة لا يثبت وحده جودة الربحية.
@@ -54,7 +48,7 @@
 
 ## حدود ما يثبته الفحص
 
-اختبارات المشروع محلية وتستخدم محاكاة لطلبات API؛ لم تتصل بحساب OANDA أو Telegram أو TradingView فعلي، ولا تثبت feed حي أو نشر Railway. لن تنشر الخدمة حتى تُضاف `OANDA_API_TOKEN` و`OANDA_ACCOUNT_ID` الصحيحان و`DATA_PROVIDER=oanda` و`OANDA_ENVIRONMENT=live`. لا أزعم أن الحساب الحي اختُبر قبل إضافة هذه القيم. نتائج المتابعة مبنية على الشموع وليست تعبئات وسيط أو أرباحاً محققة ولا تحاكي جميع تكاليف التنفيذ.
+اختبارات المشروع محلية وتستخدم محاكاة لطلبات API؛ لم تتصل بمفتاح Twelve Data أو Telegram أو TradingView فعلي، ولا تثبت اتصال feed حي أو نشر Railway. لن يجلب التطبيق بيانات Twelve Data من دون `TWELVEDATA_API_KEY` صحيح و`DATA_PROVIDER=twelvedata`. لا أزعم أن API الحي اختُبر قبل إضافة المفتاح. السعر المقدم midpoint وليس Bid/Ask أو تعبئة وسيط. نتائج المتابعة مبنية على الشموع وليست أرباحاً محققة ولا تحاكي جميع تكاليف التنفيذ.
 
 ## مراجع Railway
 
@@ -62,3 +56,5 @@
 - [ضبط أمر البدء](https://docs.railway.com/deployments/start-command)
 - [استخدام Volumes](https://docs.railway.com/volumes)
 - [مرجع Config as Code](https://docs.railway.com/config-as-code/reference) — يوصي Railway حالياً بـInfrastructure as Code للتكوين الجديد؛ لذلك يضبط هذا الدليل أمر البدء وفحص الصحة من لوحة الخدمة بدلاً من إضافة ملف إعداد قديم.
+- [Twelve Data Pricing](https://twelvedata.com/pricing) — تحقق من حدود الباقة وحقوق الاستخدام في حسابك قبل النشر.
+- [Twelve Data Quote API](https://twelvedata.com/docs/market-data/real-time-price) و[توثيق الأخطاء والمصادقة](https://twelvedata.com/docs/introduction/errors).

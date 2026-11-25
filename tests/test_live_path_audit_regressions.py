@@ -32,24 +32,18 @@ def test_rvol_does_not_drop_nan_and_use_an_older_bar_as_latest():
     assert compute_rvol(volumes) == 1.0
 
 
-def test_oanda_quote_rejects_naive_timestamp(monkeypatch):
-    url = "https://api-fxtrade.oanda.com/v3/accounts/test/pricing"
-    settings = SimpleNamespace(
-        oanda_api_token="test-token", oanda_account_id="test", oanda_environment="live"
-    )
-    payload = {"prices": [{
-        "instrument": "EUR_USD", "bids": [{"price": "1.1"}],
-        "asks": [{"price": "1.1002"}], "status": "tradeable",
-        "time": "2026-11-16T19:00:00",
-    }]}
+def test_twelvedata_quote_rejects_missing_observation_timestamp(monkeypatch):
+    url = "https://api.twelvedata.com/quote"
+    settings = SimpleNamespace(twelvedata_api_key="test-key")
+    payload = {"symbol": "EUR/USD", "close": "1.1", "is_market_open": True}
     monkeypatch.setattr(
         data_provider.httpx, "get",
         lambda *_a, **_k: __import__("httpx").Response(
             200, request=__import__("httpx").Request("GET", url), json=payload
         ),
     )
-    with pytest.raises(data_provider.DataFetchError, match="no timezone"):
-        data_provider.get_oanda_live_quote("EURUSD", settings, use_cache=False)
+    with pytest.raises(data_provider.DataFetchError, match="last_quote_at"):
+        data_provider.get_live_quote("EURUSD", settings, use_cache=False)
 
 
 def test_tradingview_rejects_timezone_less_iso_bar_time():
@@ -72,21 +66,21 @@ def test_tradingview_quote_drift_is_measured_from_original_pine_risk(monkeypatch
     quote = LiveQuote(
         "EUR_USD", 1.0855, 1.0856, datetime.now(timezone.utc), "tradeable"
     )
-    monkeypatch.setattr("src.data_provider.get_oanda_live_quote", lambda *_a, **_k: quote)
+    monkeypatch.setattr("src.data_provider.get_live_quote", lambda *_a, **_k: quote)
     with pytest.raises(ValueError, match="original TradingView entry"):
         tradingview_bridge._apply_tradingview_levels(
             make_signal(entry=1.085), alert, Settings(_env_file=None)
         )
 
 
-def test_live_cross_pair_lot_size_uses_independent_oanda_usd_conversion(monkeypatch):
+def test_live_cross_pair_lot_size_uses_independent_market_conversion(monkeypatch):
     now = datetime.now(timezone.utc)
     conversion = LiveQuote("GBP_USD", 0.82, 0.8202, now, "tradeable")
     monkeypatch.setattr(
-        data_provider, "get_oanda_live_quote", lambda symbol, *_a, **_k: conversion
+        data_provider, "get_live_quote", lambda symbol, *_a, **_k: conversion
     )
     quote = LiveQuote("EUR_GBP", 0.8600, 0.8602, now, "tradeable")
-    settings = Settings(_env_file=None, data_provider="oanda", account_size_usd=10_000)
+    settings = Settings(_env_file=None, data_provider="twelvedata", account_size_usd=10_000)
 
     repriced = risk.reprice_signal_to_quote(
         make_signal(symbol="EURGBP", entry=0.86), quote, settings
@@ -102,16 +96,16 @@ def test_live_cross_pair_repricing_fails_closed_without_currency_conversion(monk
     def unavailable(*_args, **_kwargs):
         raise data_provider.DataFetchError("conversion unavailable")
 
-    monkeypatch.setattr(data_provider, "get_oanda_live_quote", unavailable)
+    monkeypatch.setattr(data_provider, "get_live_quote", unavailable)
     quote = LiveQuote(
         "EUR_GBP", 0.8600, 0.8602, datetime.now(timezone.utc), "tradeable"
     )
 
-    with pytest.raises(ValueError, match="fresh OANDA conversion unavailable"):
+    with pytest.raises(ValueError, match="fresh market conversion unavailable"):
         risk.reprice_signal_to_quote(
             make_signal(symbol="EURGBP", entry=0.86),
             quote,
-            Settings(_env_file=None, data_provider="oanda"),
+            Settings(_env_file=None, data_provider="twelvedata"),
         )
 
 

@@ -225,11 +225,11 @@ def test_strategy_label_is_honest_and_unknown_label_rejected():
 def test_tradingview_requires_internal_direction_and_price_corroboration(monkeypatch):
     settings = SimpleNamespace(
         min_signal_confidence=0.7, min_risk_reward=2.0,
-        data_provider="oanda", oanda_quote_max_age_seconds=30,
+        data_provider="twelvedata", twelvedata_quote_max_age_seconds=30,
     )
     now = datetime.now(timezone.utc)
     monkeypatch.setattr(
-        "src.data_provider.get_oanda_live_quote",
+        "src.data_provider.get_live_quote",
         lambda *_args, **_kwargs: data_provider.LiveQuote(
             "EUR_USD", 1.0849, 1.0851, now, "tradeable"
         ),
